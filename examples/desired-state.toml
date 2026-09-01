@@ -1,0 +1,50 @@
+format_version = 1
+owner = "550e8400-e29b-41d4-a716-446655440000"
+owner_name = "Acme Agent"
+namespace = '\Acme'
+folders = []
+
+[[tasks]]
+path = '\Acme\Heartbeat'
+
+[tasks.definition]
+schema_version = "v1_6"
+triggers = []
+extensions = []
+
+[tasks.definition.registration]
+
+[tasks.definition.principal]
+id = "Author"
+logon_type = "none"
+run_level = "least_privilege"
+process_token_sid_type = "default"
+required_privileges = []
+
+[tasks.definition.principal.identity]
+type = "none"
+
+[tasks.definition.settings]
+allow_demand_start = true
+multiple_instances = "ignore_new"
+disallow_start_if_on_batteries = true
+stop_if_going_on_batteries = true
+allow_hard_terminate = true
+start_when_available = false
+enabled = true
+priority = 7
+wake_to_run = false
+hidden = false
+use_unified_scheduling_engine = false
+disallow_start_on_remote_app_session = false
+volatile = false
+
+[tasks.definition.settings.execution_time_limit]
+finite = "P3D"
+
+[[tasks.definition.actions]]
+type = "exec"
+command = "acme-agent.exe"
+hide_window = false
+
+[tasks.credentials]

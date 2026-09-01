@@ -1,0 +1,35 @@
+---
+name: commitlint
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  commitlint:
+    runs-on: ubuntu-latest
+    # Skip for dependabot: its auto-generated subjects/bodies exceed the
+    # 50/72 limits, and its PRs squash-merge with a maintainer subject.
+    # Guard on the PR *author*, not `github.actor`, so a maintainer
+    # `gh pr update-branch` on a bot PR doesn't flip the guard and let
+    # the bot's long subjects through `committed`.
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - uses: jdx/mise-action@v2
+      # Lint only the non-merge commits. `committed` flags any merge
+      # commit ("Merge branch 'main' …") as "Missing type", so a
+      # `gh pr update-branch` merge must never reach it. And `committed`
+      # takes a single revspec, so feed the SHAs one per invocation
+      # (`-rn1`): a multi-commit PR would otherwise pass several
+      # positionals at once and abort with "unexpected argument".
+      - name: Check Conventional Commits (committed)
+        run: |
+          base='${{ github.event.pull_request.base.sha }}'
+          head='${{ github.event.pull_request.head.sha }}'
+          git rev-list --no-merges "$base..$head" | xargs -rn1 committed

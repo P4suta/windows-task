@@ -1,0 +1,27 @@
+[package]
+name = "windows-task-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Official command-line interface for windows-task"
+repository.workspace = true
+authors.workspace = true
+readme = "../../README.md"
+keywords = ["windows", "task-scheduler", "automation", "cli"]
+categories = ["command-line-utilities", "os::windows-apis"]
+publish = true
+
+[[bin]]
+name = "windows-task"
+path = "src/main.rs"
+
+[dependencies]
+clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+windows-task = { workspace = true }
+
+[lints]
+workspace = true

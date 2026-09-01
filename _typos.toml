@@ -1,0 +1,18 @@
+# typos (https://github.com/crate-ci/typos) configuration.
+# Named `_typos.toml` so it doesn't collide with tools matching `typos.*`.
+
+[default]
+extend-ignore-identifiers-re = [
+    "[A-Fa-f0-9]{7,}",   # git SHAs in comments
+]
+
+[default.extend-words]
+# Add project-specific words here as they crop up.
+
+[files]
+extend-exclude = [
+    "target/",
+    "coverage/",
+    "*.lock",
+    "*.snap",
+]

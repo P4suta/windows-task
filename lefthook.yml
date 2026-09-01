@@ -1,0 +1,48 @@
+# lefthook (https://lefthook.dev/) — Rust-aware hook policy.
+# Supersedes the `lefthook` layer's generic config: rust-workspace
+# applies after `lefthook` so this file wins on overwrite.
+#
+# Install:   just hooks
+# Uninstall: just hooks-uninstall
+
+pre-commit:
+  parallel: true
+  skip:
+    - rebase
+    - merge
+  commands:
+    fmt:
+      glob: "*.rs"
+      run: just fmt
+      stage_fixed: true
+    clippy:
+      glob: "*.{rs,toml}"
+      run: just clippy
+    typos:
+      run: just typos
+    actionlint:
+      glob: ".github/workflows/*.{yml,yaml}"
+      run: just actionlint
+    yamllint:
+      glob: "**/*.{yml,yaml}"
+      run: just yamllint
+    markdownlint:
+      glob: "**/*.md"
+      run: just markdownlint
+    strict-code:
+      run: just strict-code
+
+commit-msg:
+  commands:
+    conventional:
+      run: committed --commit-file {1}
+
+pre-push:
+  parallel: true
+  skip:
+    - rebase
+  commands:
+    test:
+      run: just test
+    audit:
+      run: just audit

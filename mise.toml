@@ -1,0 +1,12 @@
+# mise (https://mise.jdx.dev/) tool configuration for windows-task.
+# Day-1 generic CLIs that every project benefits from. Language layers
+# add their own entries (rustc, node, deno, …) when applied.
+
+[tools]
+just                          = "latest"
+lefthook                      = "latest"
+"github:crate-ci/typos"      = "latest"
+actionlint                    = "latest"
+yamllint                      = "latest"
+"npm:markdownlint-cli2"      = "latest"
+"github:crate-ci/committed"  = "latest"

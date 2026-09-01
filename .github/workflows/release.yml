@@ -1,0 +1,96 @@
+---
+name: release
+
+on:
+  push:
+    tags: ["v*.*.*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to package
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows-x86_64
+            target: x86_64-pc-windows-msvc
+          - name: windows-aarch64
+            target: aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - name: Install Rust target
+        shell: pwsh
+        run: |
+          rustup toolchain install 1.85.0 --profile minimal
+          rustup target add --toolchain 1.85.0 ${{ matrix.target }}
+      - name: Verify tag matches the workspace version
+        shell: pwsh
+        run: |
+          $releaseTag = "${{ inputs.tag || github.ref_name }}"
+          $metadata = cargo +1.85.0 metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $version = ($metadata.packages | Where-Object { $_.name -eq "windows-task" }).version
+          if ($releaseTag -ne "v$version") {
+            throw "release tag $releaseTag does not match workspace version $version"
+          }
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build CLI
+        shell: pwsh
+        run: >-
+          cargo +1.85.0 build --locked --release -p windows-task-cli
+          --target ${{ matrix.target }}
+      - name: Package archive and checksum
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist
+          Copy-Item "target/${{ matrix.target }}/release/windows-task.exe" dist/
+          Copy-Item LICENSE-APACHE, LICENSE-MIT, NOTICE, README.md dist/
+          $archive = "windows-task-${{ matrix.name }}.zip"
+          Compress-Archive -Path dist/* -DestinationPath $archive
+          $checksum = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
+          "$checksum  $archive" | Out-File -Encoding ascii "$archive.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: |
+            windows-task-${{ matrix.name }}.zip
+            windows-task-${{ matrix.name }}.zip.sha256
+          if-no-files-found: error
+
+  release:
+    name: Publish GitHub release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" artifacts/* --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$RELEASE_TAG" artifacts/* --generate-notes --verify-tag --repo "$GITHUB_REPOSITORY"
+          fi

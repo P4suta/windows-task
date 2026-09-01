@@ -1,0 +1,23 @@
+# `committed` (https://github.com/crate-ci/committed) — Conventional
+# Commits linter used by the commit-msg lefthook hook and by CI on PR
+# titles.
+
+style = "conventional"
+subject-capitalization = "lower"
+subject-not-punctuated = true
+imperative-subject = true
+no-fixup = true
+no-wip = true
+allowed-types = [
+  "feat",
+  "fix",
+  "docs",
+  "style",
+  "refactor",
+  "perf",
+  "test",
+  "build",
+  "ci",
+  "chore",
+  "revert",
+]

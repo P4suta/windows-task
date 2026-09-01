@@ -1,0 +1,52 @@
+# Tight thresholds — creeping complexity caught at the gate, not in
+# review. Adjust as the codebase matures, but never relax.
+
+doc-valid-idents = [
+    "..",
+    "GitHub",
+    "JSON",
+    "TOML",
+    "YAML",
+    "MIT",
+    "ADR",
+]
+
+# 4 args max; beyond, bundle into a parameter struct.
+too-many-arguments-threshold = 4
+
+# Single-screen functions: 80 lines hard cap.
+too-many-lines-threshold = 80
+
+# Force extract-method earlier than clippy's default of 25.
+cognitive-complexity-threshold = 18
+
+type-complexity-threshold = 250
+
+# Two or more bool params is a smell; pass an enum.
+max-fn-params-bools = 1
+
+enum-variant-name-threshold = 2
+enum-variant-size-threshold = 256
+
+# Floor matches rust-toolchain.toml.
+msrv = "1.85.0"
+
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests  = true
+
+# Pre-1.0 — don't gate API churn on existing exports.
+avoid-breaking-exported-api = false
+
+pass-by-value-size-limit = 128
+
+disallowed-methods = [
+    { path = "std::mem::forget",     reason = "leaks destructors; use `ManuallyDrop` or explicit drop" },
+    { path = "std::env::set_var",    reason = "races with other threads; thread Options through APIs instead" },
+    { path = "std::env::remove_var", reason = "see std::env::set_var" },
+    { path = "std::process::exit",   reason = "bypasses destructors; return ExitCode from main" },
+]
+
+disallowed-types = [
+    { path = "std::sync::RwLock", reason = "parking_lot preferred where contention matters; raise an ADR to opt in" },
+]

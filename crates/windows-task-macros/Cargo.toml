@@ -1,0 +1,24 @@
+[package]
+name = "windows-task-macros"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Implementation macros for windows-task COM handlers"
+repository.workspace = true
+authors.workspace = true
+readme = "../../README.md"
+keywords = ["windows", "task-scheduler", "com", "procedural-macro"]
+categories = ["development-tools::procedural-macro-helpers", "os::windows-apis"]
+publish = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true }
+
+[lints]
+workspace = true

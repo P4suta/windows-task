@@ -1,0 +1,99 @@
+[package]
+name = "windows-task"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description.workspace = true
+repository.workspace = true
+authors.workspace = true
+readme = "../../README.md"
+documentation = "https://docs.rs/windows-task"
+keywords = ["windows", "task-scheduler", "automation", "com", "scheduler"]
+categories = ["os::windows-apis", "api-bindings"]
+include = [
+    "/src/**",
+    "/tests/**",
+    "/examples/**",
+    "/LICENSE-APACHE",
+    "/LICENSE-MIT",
+    "/NOTICE",
+]
+
+[package.metadata.docs.rs]
+all-features = true
+default-target = "x86_64-pc-windows-msvc"
+targets = ["x86_64-pc-windows-msvc", "aarch64-pc-windows-msvc"]
+
+[features]
+default = [
+    "client",
+    "async",
+    "history",
+    "diagnostics",
+    "serde",
+    "reconcile",
+    "recipes",
+    "cron",
+]
+client = ["dep:bitflags"]
+async = ["client", "dep:futures-channel", "dep:futures-core"]
+history = ["client"]
+diagnostics = ["client"]
+serde = [
+    "dep:serde",
+    "dep:serde_json",
+    "dep:serde-saphyr",
+    "dep:toml",
+]
+reconcile = ["client", "serde"]
+recipes = []
+cron = ["recipes"]
+handler = ["dep:windows-core", "dep:windows-task-macros"]
+
+[dependencies]
+bitflags = { workspace = true, optional = true }
+futures-channel = { workspace = true, optional = true }
+futures-core = { workspace = true, optional = true }
+jiff = { workspace = true }
+quick-xml = { workspace = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+serde-saphyr = { workspace = true, optional = true }
+thiserror = { workspace = true }
+toml = { workspace = true, optional = true }
+uuid = { workspace = true }
+windows-task-macros = { workspace = true, optional = true }
+zeroize = { workspace = true }
+
+[target.'cfg(windows)'.dependencies.windows]
+workspace = true
+features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Credentials",
+    "Win32_System_Com",
+    "Win32_System_Com_Marshal",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_EventLog",
+    "Win32_System_Ole",
+    "Win32_System_Registry",
+    "Win32_System_TaskScheduler",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+]
+
+[target.'cfg(windows)'.dependencies.windows-core]
+workspace = true
+optional = true
+
+[[example]]
+name = "manifest"
+required-features = ["serde"]
+
+[[example]]
+name = "handler"
+required-features = ["handler"]
+
+[lints]
+workspace = true

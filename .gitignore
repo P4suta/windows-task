@@ -1,0 +1,24 @@
+# Editor scratch
+.vscode/*
+!.vscode/extensions.json
+.idea/
+*.swp
+*.swo
+
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Logs / scratch
+*.log
+.scratch/
+/target/
+
+# Direnv
+.envrc.local
+
+# Personal Claude Code working notes — treated as a per-developer file,
+# not a shared project artefact. Shared conventions live in README /
+# CONTRIBUTING / docs/adr instead.
+CLAUDE.md
+CLAUDE.local.md

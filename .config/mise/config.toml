@@ -1,0 +1,19 @@
+# Rust toolchain + cargo-plugin pins for repos that apply the
+# `rust-workspace` layer.
+#
+# mise merges this file with the generic `mise.toml` from the `core`
+# layer (same directory, tool-level union) — so a single `mise install`
+# provisions every tool, identically on a developer host and inside the
+# docker-dev image. This keeps `mise.toml` (generic CLIs) and the Rust
+# toolset in disjoint files, which the layer engine requires.
+#
+# The rust *version* lives in `rust-toolchain.toml` (rustup, cargo and
+# IDEs read it); it is restated here only so `mise install` provisions a
+# matching toolchain. Keep the two pins in sync on every bump.
+
+[tools]
+rust = "1.85.0"
+"cargo:cargo-nextest" = "latest"
+"cargo:cargo-deny" = "latest"
+"cargo:cargo-llvm-cov" = "latest"
+"cargo:bacon" = "latest"  # `just watch`

@@ -1,0 +1,160 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+exclude = []
+
+[workspace.package]
+version       = "0.1.0"
+edition       = "2024"
+rust-version  = "1.85"
+license       = "Apache-2.0 OR MIT"
+description   = "Complete, safe, task-oriented Rust interface to Windows Task Scheduler 2.0"
+repository    = "https://github.com/P4suta/windows-task"
+authors       = ["Yasunobu Sakashita"]
+readme        = "README.md"
+
+# ---------------------------------------------------------------------------
+# Workspace lints — single source of truth. Per-crate `[lints.*]` carve
+# -outs are not allowed; per-crate exceptions go through the strict-code
+# grep gate (see `just strict-code`).
+# ---------------------------------------------------------------------------
+[workspace.lints.rust]
+unsafe_code      = "deny"
+non_ascii_idents = "deny"
+
+missing_debug_implementations = "warn"
+missing_copy_implementations  = "warn"
+trivial_casts                 = "warn"
+trivial_numeric_casts         = "warn"
+unused_import_braces          = "warn"
+unused_lifetimes              = "warn"
+unused_qualifications         = "warn"
+
+unreachable_pub                = "warn"
+single_use_lifetimes           = "warn"
+elided_lifetimes_in_paths      = "warn"
+redundant_lifetimes            = "warn"
+explicit_outlives_requirements = "warn"
+
+let_underscore_drop         = "warn"
+keyword_idents_2024         = "warn"
+variant_size_differences    = "warn"
+ambiguous_negative_literals = "warn"
+
+dead_code = "deny"
+
+rust_2024_compatibility = { level = "warn", priority = -1 }
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links       = "deny"
+private_intra_doc_links      = "warn"
+invalid_codeblock_attributes = "warn"
+invalid_html_tags            = "warn"
+invalid_rust_codeblocks      = "warn"
+bare_urls                    = "warn"
+redundant_explicit_links     = "warn"
+unescaped_backticks          = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+nursery  = { level = "warn", priority = -1 }
+cargo    = { level = "warn", priority = -1 }
+
+dbg_macro                  = "warn"
+todo                       = "warn"
+unimplemented              = "warn"
+clone_on_ref_ptr           = "warn"
+unnecessary_safety_comment = "warn"
+unnecessary_safety_doc     = "warn"
+missing_assert_message     = "warn"
+
+# Hand-picked restriction lints. The full restriction group is NOT enabled —
+# it contains mutually contradictory lints; each entry here is deliberate.
+str_to_string                   = "warn"
+absolute_paths                  = "allow" # fully qualified paths clarify generated/native boundaries
+allow_attributes_without_reason = "warn"
+empty_structs_with_brackets     = "warn"
+if_then_some_else_none          = "warn"
+let_underscore_must_use         = "warn"
+mixed_read_write_in_expression  = "warn"
+rest_pat_in_fully_bound_structs = "warn"
+same_name_method                = "warn"
+semicolon_outside_block         = "warn"
+try_err                         = "warn"
+unneeded_field_pattern          = "warn"
+verbose_file_reads              = "warn"
+format_push_string              = "warn"
+unnecessary_self_imports        = "warn"
+assertions_on_result_states     = "warn"
+filetype_is_file                = "warn"
+rc_buffer                       = "warn"
+rc_mutex                        = "warn"
+lossy_float_literal             = "warn"
+suspicious_xor_used_as_pow      = "warn"
+
+# Shape/style lints that do not fit a broad Windows schema binding. The
+# correctness-oriented pedantic/nursery lints remain enabled above.
+missing_errors_doc          = "allow" # concise API docs describe behavior; errors have stable ErrorKind
+too_many_lines              = "allow" # XML/COM match tables are clearer when kept contiguous
+too_many_arguments          = "allow" # native signatures and transactional context are inherently wide
+struct_excessive_bools      = "allow" # Task Scheduler exposes many independent boolean settings
+struct_field_names          = "allow" # max_* is the clearest bounded-parser vocabulary
+doc_markdown                = "allow" # Windows product/API names are prose, not Rust identifiers
+semicolon_if_nothing_returned = "allow" # formatting-only
+must_use_candidate          = "allow" # pre-1.0 API annotations are selected deliberately
+unnecessary_wraps           = "allow" # parser helpers retain uniform fallible signatures
+derivable_impls             = "allow" # explicit defaults document native defaults
+option_if_let_else          = "allow" # match-shaped XML decoding reads more directly
+field_reassign_with_default = "allow" # incremental XML decoding mirrors element order
+items_after_statements      = "allow" # small parser-local frames avoid module-level leakage
+result_large_err            = "allow" # ApplyFailure intentionally carries a compensation report
+default_trait_access        = "allow" # generic Default keeps fixtures concise
+
+# Justified carve-outs.
+module_name_repetitions = "allow" # crate-name-prefix on module-level items reads cleaner than fighting this
+multiple_crate_versions = "allow" # transitive collisions are upstream's problem
+missing_const_for_fn    = "allow" # pre-1.0 churn — revisit at API stabilisation
+redundant_pub_crate     = "allow" # conflicts with rustc's `unreachable_pub`
+
+[workspace.dependencies]
+bitflags           = "2.9"
+clap               = { version = "4.6", features = ["derive", "wrap_help"] }
+futures-channel    = "0.3.31"
+futures-core       = "0.3.31"
+jiff               = "0.2.35"
+proc-macro2        = "1.0"
+# 0.42 raises its MSRV to Rust 1.86; this workspace promises Rust 1.85.
+quick-xml          = "0.41"
+quote              = "1.0"
+serde              = { version = "1.0", features = ["derive"] }
+serde_json         = "1.0"
+# 0.0.10 is the newest release in this maintained line that compiles on the
+# promised Rust 1.85 MSRV. Newer releases use post-1.85 language features.
+serde-saphyr       = "=0.0.10"
+syn                = { version = "2.0", features = ["full"] }
+thiserror          = "2.0"
+toml               = "0.9"
+uuid               = { version = "1.18", features = ["v4", "serde"] }
+windows            = "0.62.2"
+windows-core       = "0.62.2"
+windows-task       = { version = "0.1.0", path = "crates/windows-task" }
+windows-task-macros = { version = "0.1.0", path = "crates/windows-task-macros" }
+zeroize            = { version = "1.8", features = ["derive"] }
+
+[profile.release]
+lto           = "thin"
+codegen-units = 1
+strip         = "symbols"
+panic         = "abort"
+opt-level     = 3
+
+[profile.bench]
+inherits = "release"
+strip    = "none"
+debug    = 1
+
+[profile.dev]
+split-debuginfo = "unpacked"
+
+[profile.dev.package."*"]
+opt-level = 1

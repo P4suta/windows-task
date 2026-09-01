@@ -1,0 +1,6 @@
+# Wires `cargo xtask <subcommand>` to invoke `cargo run --package
+# xtask --` so contributors don't have to remember the `--package`
+# incantation.
+
+[alias]
+xtask = "run --package xtask --"

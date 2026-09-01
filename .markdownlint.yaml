@@ -1,0 +1,32 @@
+default: true
+
+# Allow long lines for tables and reference-style links.
+MD013: false
+# Allow inline HTML — needed for ADRs that embed diagrams or details/summary.
+MD033: false
+# Permit duplicate headings across sibling layer READMEs.
+MD024:
+  siblings_only: true
+# Permit bare URLs in inline contexts (issue references, command output).
+MD034: false
+# Allow either `*` or `-` as the unordered-list marker. ADRs and
+# template-author files in the wild use both; forcing one is churn
+# without information value.
+MD004: false
+# Files that legitimately do not start with an H1 — issue / PR
+# templates, partial fragments, ADR boilerplate. Skip the
+# first-line-heading check on those rather than coerce them.
+MD041:
+  level: 1
+  front_matter_title: '^\s*title\s*[:=]'
+  ignore_paths:
+    - "**/PULL_REQUEST_TEMPLATE.md"
+    - "**/ISSUE_TEMPLATE/**"
+
+# Ignore generated outputs.
+ignores:
+  - "target/"
+  - ".template/tmpl/target/"
+  - "**/CHANGELOG.md"
+  - "**/PULL_REQUEST_TEMPLATE.md"
+  - "**/ISSUE_TEMPLATE/**"
