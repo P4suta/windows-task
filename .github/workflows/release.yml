@@ -30,7 +30,7 @@ jobs:
           - name: windows-aarch64
             target: aarch64-pc-windows-msvc
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ inputs.tag || github.ref }}
       - name: Install Rust target
@@ -65,7 +65,7 @@ jobs:
           Compress-Archive -Path dist/* -DestinationPath $archive
           $checksum = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
           "$checksum  $archive" | Out-File -Encoding ascii "$archive.sha256"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.name }}
           path: |
@@ -80,7 +80,7 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
