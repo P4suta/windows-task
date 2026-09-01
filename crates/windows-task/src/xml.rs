@@ -502,16 +502,6 @@ fn parse_registration(node: &Node) -> Result<RegistrationInfo> {
 }
 
 fn parse_principal(node: &Node) -> Result<Principal> {
-    let logon_type = match node.child_text("LogonType").unwrap_or("None") {
-        "None" => LogonType::None,
-        "Password" => LogonType::Password,
-        "InteractiveToken" => LogonType::InteractiveToken,
-        "S4U" => LogonType::S4u,
-        "Group" => LogonType::Group,
-        "ServiceAccount" => LogonType::ServiceAccount,
-        "InteractiveTokenOrPassword" => LogonType::InteractiveTokenOrPassword,
-        value => return Err(xml_error(format!("unknown LogonType {value:?}"))),
-    };
     let identity = if let Some(group) = node.child_text("GroupId") {
         PrincipalIdentity::Group(group.into())
     } else if let Some(user) = node.child_text("UserId") {
@@ -527,6 +517,24 @@ fn parse_principal(node: &Node) -> Result<Principal> {
         }
     } else {
         PrincipalIdentity::None
+    };
+    let logon_type = match node.child_text("LogonType") {
+        Some("None") => LogonType::None,
+        Some("Password") => LogonType::Password,
+        Some("InteractiveToken") => LogonType::InteractiveToken,
+        Some("S4U") => LogonType::S4u,
+        // These values are not part of the Task Scheduler XML schema, but
+        // accepting them keeps older documents readable. Canonical output
+        // omits them and registration supplies the native TASK_LOGON_TYPE.
+        Some("Group") => LogonType::Group,
+        Some("ServiceAccount") => LogonType::ServiceAccount,
+        Some("InteractiveTokenOrPassword") => LogonType::InteractiveTokenOrPassword,
+        Some(value) => return Err(xml_error(format!("unknown LogonType {value:?}"))),
+        None => match &identity {
+            PrincipalIdentity::Group(_) => LogonType::Group,
+            PrincipalIdentity::ServiceAccount(_) => LogonType::ServiceAccount,
+            PrincipalIdentity::None | PrincipalIdentity::User(_) => LogonType::None,
+        },
     };
     let run_level = match node.child_text("RunLevel").unwrap_or("LeastPrivilege") {
         "LeastPrivilege" => RunLevel::LeastPrivilege,
@@ -1118,18 +1126,16 @@ fn write_principal(principal: &Principal) -> String {
     if let Some(display_name) = &principal.display_name {
         children.push(element("DisplayName", display_name));
     }
-    children.push(element(
-        "LogonType",
-        match principal.logon_type {
-            LogonType::None => "None",
-            LogonType::Password => "Password",
-            LogonType::InteractiveToken => "InteractiveToken",
-            LogonType::S4u => "S4U",
-            LogonType::Group => "Group",
-            LogonType::ServiceAccount => "ServiceAccount",
-            LogonType::InteractiveTokenOrPassword => "InteractiveTokenOrPassword",
-        },
-    ));
+    let xml_logon_type = match principal.logon_type {
+        LogonType::None | LogonType::Group | LogonType::ServiceAccount => None,
+        LogonType::Password => Some("Password"),
+        LogonType::InteractiveToken => Some("InteractiveToken"),
+        LogonType::S4u => Some("S4U"),
+        LogonType::InteractiveTokenOrPassword => Some("InteractiveTokenOrPassword"),
+    };
+    if let Some(logon_type) = xml_logon_type {
+        children.push(element("LogonType", logon_type));
+    }
     children.push(element(
         "RunLevel",
         match principal.run_level {
@@ -1714,7 +1720,10 @@ fn escape_attribute(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use crate::model::{Action, ExecAction, TaskDefinition, XmlExtension};
+    use crate::model::{
+        Action, ExecAction, LogonType, PrincipalIdentity, ServiceAccount, TaskDefinition,
+        XmlExtension,
+    };
 
     use super::{ParseLimits, RawTaskXml, from_bytes, to_string, to_utf16le, without_declaration};
 
@@ -1754,6 +1763,30 @@ mod tests {
             from_bytes(transported.as_bytes()).expect("parse"),
             definition
         );
+    }
+
+    #[test]
+    fn native_principal_logon_types_are_omitted_and_inferred() {
+        let cases = [
+            (
+                PrincipalIdentity::Group("BUILTIN\\Users".into()),
+                LogonType::Group,
+            ),
+            (
+                PrincipalIdentity::ServiceAccount(ServiceAccount::LocalSystem),
+                LogonType::ServiceAccount,
+            ),
+        ];
+
+        for (identity, logon_type) in cases {
+            let mut definition = TaskDefinition::new(Action::Exec(ExecAction::new("cmd.exe")));
+            definition.principal.identity = identity;
+            definition.principal.logon_type = logon_type;
+
+            let xml = to_string(&definition).expect("serialize");
+            assert!(!xml.contains("<LogonType>"));
+            assert_eq!(from_bytes(xml.as_bytes()).expect("parse"), definition);
+        }
     }
 
     #[test]
