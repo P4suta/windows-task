@@ -19,4 +19,5 @@ rust = "1.85.0"
 "github:nextest-rs/nextest" = "latest"
 "github:EmbarkStudios/cargo-deny" = "latest"
 "github:taiki-e/cargo-llvm-cov" = "latest"
-"github:Canop/bacon" = "latest"  # `just watch`
+# bacon does not publish binary assets; its latest release supports Rust 1.85.
+"cargo:bacon" = "latest"  # `just watch`

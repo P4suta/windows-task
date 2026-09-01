@@ -4,9 +4,9 @@ set dotenv-load := false
 # Tooling is provisioned by mise (mise.toml + .config/mise/config.toml);
 # run `just bootstrap` once after cloning. The rust toolchain is pinned
 # in rust-toolchain.toml. cargo plugins (nextest / deny / llvm-cov) are
-# invoked through `mise exec` so lefthook hooks — which spawn under
-# /bin/sh with a PATH that can lag a fresh mise install — resolve them
-# deterministically.
+# invoked through an explicit `mise exec <tool>` where needed so hooks — which
+# spawn under /bin/sh with a PATH that can lag a fresh install — resolve them
+# deterministically without installing unrelated development tools.
 #
 # This is a host/mise workflow: plain `cargo`, no container required.
 # Repos that need a reproducible OS envelope (locale / Unicode
@@ -25,7 +25,8 @@ default:
 # ---------------------------------------------------------------------------
 
 bootstrap:
-    mise install
+    # Cargo-backed tools share rustup state, so install sequentially.
+    mise install --jobs=1
     just hooks
 
 hooks:
@@ -75,6 +76,7 @@ markdownlint:
 # Reject patterns that mask real bugs even when type / lint gates pass.
 strict-code:
     @echo "::group::strict-code"
+    command -v rg >/dev/null || (echo "ripgrep is required for strict-code" && exit 1)
     ! rg -n '\b(TODO|FIXME)\b' --glob '*.rs' --glob '!target/**' . \
         | rg -v '\(#[0-9]+\)' \
         || (echo "bare TODO/FIXME — add (#NN) issue link" && exit 1)
@@ -107,12 +109,12 @@ docs:
         --all-features --no-deps
 
 coverage:
-    mise exec -- cargo llvm-cov --workspace \
+    mise exec github:taiki-e/cargo-llvm-cov -- cargo llvm-cov --workspace \
         --fail-under-regions {{COVERAGE_FLOOR}} \
         --summary-only
 
 audit:
-    mise exec -- cargo deny check
+    mise exec github:EmbarkStudios/cargo-deny -- cargo-deny check
 
 msrv:
     cargo +1.85.0 xtask msrv
