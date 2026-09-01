@@ -33,7 +33,7 @@ jobs:
         with:
           install_args: >-
             just github:crate-ci/typos actionlint yamllint
-            npm:markdownlint-cli2 cargo:cargo-deny
+            npm:markdownlint-cli2 github:EmbarkStudios/cargo-deny
       - uses: Swatinem/rust-cache@v2
       - name: Install Windows Rust targets
         run: >-

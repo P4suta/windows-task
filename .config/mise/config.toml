@@ -13,7 +13,10 @@
 
 [tools]
 rust = "1.85.0"
-"cargo:cargo-nextest" = "latest"
-"cargo:cargo-deny" = "latest"
-"cargo:cargo-llvm-cov" = "latest"
-"cargo:bacon" = "latest"  # `just watch`
+# Install development CLIs from their release artifacts. Building their latest
+# releases with Cargo would incorrectly couple their MSRVs to the crate's 1.85
+# MSRV (for example, cargo-deny itself currently requires newer Rust).
+"github:nextest-rs/nextest" = "latest"
+"github:EmbarkStudios/cargo-deny" = "latest"
+"github:taiki-e/cargo-llvm-cov" = "latest"
+"github:Canop/bacon" = "latest"  # `just watch`
