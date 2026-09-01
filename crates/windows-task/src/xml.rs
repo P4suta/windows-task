@@ -145,24 +145,38 @@ pub fn from_bytes(bytes: &[u8]) -> Result<TaskDefinition> {
 
 /// Writes canonical UTF-8 Task XML with an XML declaration.
 pub fn to_string(definition: &TaskDefinition) -> Result<String> {
+    encoded_string(definition, "UTF-8")
+}
+
+fn encoded_string(definition: &TaskDefinition, encoding: &str) -> Result<String> {
     if !definition.validate().is_valid() {
         return Err(Error::new(
             ErrorKind::InvalidDefinition,
             "cannot serialize an invalid task definition",
         ));
     }
-    Ok(write_definition(definition))
+    Ok(write_definition(definition, encoding))
 }
 
 /// Writes canonical UTF-16LE Task XML with a BOM for native registration.
 pub fn to_utf16le(definition: &TaskDefinition) -> Result<Vec<u8>> {
-    let text = to_string(definition)?;
+    let text = encoded_string(definition, "UTF-16")?;
     let mut output = Vec::with_capacity(text.len() * 2 + 2);
     output.extend_from_slice(&[0xFF, 0xFE]);
     for unit in text.encode_utf16() {
         output.extend_from_slice(&unit.to_le_bytes());
     }
     Ok(output)
+}
+
+/// Removes an optional XML declaration before text is passed through a UTF-16
+/// `BSTR`. The COM API already carries decoded characters, so retaining a byte
+/// encoding declaration can make Task Scheduler reject otherwise valid XML.
+#[cfg(any(windows, test))]
+pub(crate) fn without_declaration(text: &str) -> &str {
+    text.strip_prefix("<?xml")
+        .and_then(|rest| rest.find("?>").map(|end| &rest[end + 2..]))
+        .unwrap_or(text)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1013,7 +1027,7 @@ fn node_to_xml(node: &Node) -> String {
     output
 }
 
-fn write_definition(definition: &TaskDefinition) -> String {
+fn write_definition(definition: &TaskDefinition, encoding: &str) -> String {
     let mut root_children = Vec::new();
     if definition.registration != RegistrationInfo::default()
         || has_extensions(definition, "Task/RegistrationInfo")
@@ -1041,7 +1055,7 @@ fn write_definition(definition: &TaskDefinition) -> String {
     root_children.push(write_actions(definition));
     let children = merge_extensions("Task", root_children, &definition.extensions);
     format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\r\n<Task version=\"{}\" xmlns=\"{}\">{}</Task>\r\n",
+        "<?xml version=\"1.0\" encoding=\"{encoding}\"?>\r\n<Task version=\"{}\" xmlns=\"{}\">{}</Task>\r\n",
         escape_attribute(definition.schema_version.as_str()),
         TASK_NAMESPACE,
         children.join("")
@@ -1702,7 +1716,7 @@ fn escape_attribute(value: &str) -> String {
 mod tests {
     use crate::model::{Action, ExecAction, TaskDefinition, XmlExtension};
 
-    use super::{ParseLimits, RawTaskXml, from_bytes, to_string, to_utf16le};
+    use super::{ParseLimits, RawTaskXml, from_bytes, to_string, to_utf16le, without_declaration};
 
     #[test]
     fn minimal_definition_round_trips() {
@@ -1718,7 +1732,28 @@ mod tests {
     fn utf16le_round_trips() {
         let definition = TaskDefinition::new(Action::Exec(ExecAction::new("pwsh.exe")));
         let xml = to_utf16le(&definition).expect("UTF-16");
+        let declaration = String::from_utf16(
+            &xml[2..]
+                .chunks_exact(2)
+                .map(|bytes| u16::from_le_bytes([bytes[0], bytes[1]]))
+                .collect::<Vec<_>>(),
+        )
+        .expect("valid UTF-16");
+        assert!(declaration.starts_with("<?xml version=\"1.0\" encoding=\"UTF-16\"?>"));
         assert_eq!(from_bytes(&xml).expect("parse"), definition);
+    }
+
+    #[test]
+    fn strips_the_encoding_declaration_for_bstr_transport() {
+        let definition = TaskDefinition::new(Action::Exec(ExecAction::new("cmd.exe")));
+        let xml = to_string(&definition).expect("serialize");
+        let transported = without_declaration(&xml);
+        assert!(!transported.contains("encoding="));
+        assert!(transported.trim_start().starts_with("<Task "));
+        assert_eq!(
+            from_bytes(transported.as_bytes()).expect("parse"),
+            definition
+        );
     }
 
     #[test]

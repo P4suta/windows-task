@@ -279,6 +279,7 @@ impl Session {
             return Ok(report);
         }
         let xml = xml::to_string(&definition)?;
+        let xml = xml::without_declaration(&xml);
         let native = unsafe { self.service.NewTask(0) }
             .map_err(|error| self.native("create validation definition", error))?;
         configure_proxy(&native, self.security_policy)?;
@@ -342,6 +343,7 @@ impl Session {
         }
         let folder = self.folder(&path.folder())?;
         let xml_text = xml.decoded()?;
+        let xml_text = xml::without_declaration(&xml_text);
         let user_id = principal_user(&definition);
         let user = user_id
             .as_deref()
