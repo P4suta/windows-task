@@ -25,6 +25,16 @@ explicitly ignored mutation tests, on an isolated disposable Windows host.
 `--suite all` runs both. Mutation tests have unique names and must report cleanup
 errors; running ordinary `cargo test` leaves them visibly ignored.
 
+The native suite now also verifies a real Operational log clear. This requires
+`GITHUB_ACTIONS=true`, `RUNNER_ENVIRONMENT=github-hosted` and the explicit
+`WINDOWS_TASK_CLEAR_EVENT_LOG=1` acknowledgement supplied by CI. The test refuses
+local and self-hosted execution before connecting or changing any state. It uses
+`wevtutil cl` only for the Task Scheduler Operational channel, then checks a
+terminal `HistoryGap` through the public watcher. Native mutation tests run
+serially so clearing cannot race another fixture's exact execution wait.
+Other mutation tests retain isolated task paths and cleanup reports; clearing
+the disposable host's log is intentionally irreversible.
+
 The production reconciliation backend, run observer and watcher delivery loop
 are exercised with deterministic faults. Response loss after mutation, failed
 compensation, inaccessible history and delayed completion must remain regression
