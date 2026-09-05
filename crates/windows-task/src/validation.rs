@@ -92,22 +92,24 @@ pub struct Diagnostic {
 
 impl Diagnostic {
     fn error(code: DiagnosticCode, path: impl Into<String>, message: impl Into<String>) -> Self {
+        let remediation = Some(code.remediation().into());
         Self {
             level: DiagnosticLevel::Error,
             code,
             path: path.into(),
             message: message.into(),
-            remediation: None,
+            remediation,
         }
     }
 
     fn warning(code: DiagnosticCode, path: impl Into<String>, message: impl Into<String>) -> Self {
+        let remediation = Some(code.remediation().into());
         Self {
             level: DiagnosticLevel::Warning,
             code,
             path: path.into(),
             message: message.into(),
-            remediation: None,
+            remediation,
         }
     }
 
@@ -116,6 +118,39 @@ impl Diagnostic {
     pub fn with_remediation(mut self, remediation: impl Into<String>) -> Self {
         self.remediation = Some(remediation.into());
         self
+    }
+}
+
+impl DiagnosticCode {
+    fn remediation(&self) -> &'static str {
+        match self {
+            Self::MissingAction => "Add at least one Exec or COM handler action.",
+            Self::DuplicateId => "Assign a unique identifier to each sibling element.",
+            Self::EmptyValue => "Supply a non-empty value for the indicated field.",
+            Self::OutOfRange => "Set the field within the range stated in the diagnostic.",
+            Self::IncompleteTrigger => {
+                "Supply the missing boundary and schedule selections for this trigger."
+            }
+            Self::PrincipalLogonMismatch => {
+                "Choose an identity and logon type that describe the same user, group or service account."
+            }
+            Self::PasswordRequired => {
+                "Provide the registration password through a credential resolver, not through the definition."
+            }
+            Self::DeprecatedAction => {
+                "Replace the legacy action with an Exec or COM handler action supported by the target."
+            }
+            Self::SchemaTooOld => {
+                "Raise the schema version on a compatible target or remove the newer field."
+            }
+            Self::RegistrationTriggerSideEffect => {
+                "Suppress registration triggers unless their execution is intended."
+            }
+            Self::OpaqueExtension => {
+                "Preserve the raw XML and validate the extension against the target scheduler."
+            }
+            _ => "Inspect the indicated field and correct the condition described before retrying.",
+        }
     }
 }
 
@@ -421,6 +456,13 @@ fn validate_schema(definition: &TaskDefinition, report: &mut ValidationReport) {
         TaskSchemaVersion::V1_5 => 5,
         TaskSchemaVersion::V1_6 | TaskSchemaVersion::Unknown(_) => 6,
     };
+    if definition.settings.use_unified_scheduling_engine && generation < 3 {
+        report.push(Diagnostic::error(
+            DiagnosticCode::SchemaTooOld,
+            "settings.use_unified_scheduling_engine",
+            "unified scheduling requires schema 1.3 or later",
+        ));
+    }
     if definition.settings.maintenance.is_some() && generation < 4 {
         report.push(Diagnostic::error(
             DiagnosticCode::SchemaTooOld,

@@ -1,0 +1,7 @@
+error: expected clsid = "..."
+ --> tests/ui/missing_clsid.rs:2:1
+  |
+2 | #[windows_task::handler]
+  | ^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `windows_task::handler` (in Nightly builds, run with -Z macro-backtrace for more info)

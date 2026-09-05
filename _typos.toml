@@ -8,6 +8,7 @@ extend-ignore-identifiers-re = [
 
 [default.extend-words]
 # Add project-specific words here as they crop up.
+BA = "BA" # SDDL built-in administrators SID alias.
 
 [files]
 extend-exclude = [

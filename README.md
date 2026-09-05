@@ -110,11 +110,12 @@ See [the CLI guide](docs/cli.md) and the checked
 
 ## Desired state and rollback
 
-Each managed task gets a deterministic registration URI containing the
-manifest owner UUID and task path. By default:
+Each managed task gets a deterministic ownership marker containing the manifest
+owner UUID and task path in `RegistrationInfo.Source`. Existing Source text is
+preserved after a newline. Windows rewrites `URI` to the task path. By default:
 
 - an unowned collision is an error;
-- pruning is off and can delete only tasks carrying the same ownership URI;
+- pruning is off and can delete only tasks carrying the same ownership marker;
 - registration triggers are suppressed during apply and rollback;
 - all old XML and ACLs are captured before the first mutation;
 - password-backed updates/deletes require a separately resolvable rollback
@@ -175,6 +176,7 @@ x64 and ARM64 artifacts separately when targeting both systems.
 | `reconcile` | yes | Ownership-safe plan/apply/rollback |
 | `recipes` | yes | Common schedule constructors |
 | `cron` | yes | Exact five-field POSIX cron compiler |
+| `tracing` | yes | Structured operation metadata; application owns output setup |
 | `handler` | no | COM handler runtime and attribute macro |
 
 Use `default-features = false` for a smaller portable model/XML-only build.
@@ -187,6 +189,9 @@ cargo +1.85.0 xtask check-windows
 ```
 
 Architecture and security decisions live in [the ADR index](docs/ADR_INDEX.md).
+See [verification and reproduction](docs/verification.md) and the
+[reliability API migration](docs/migration-reliability.md) for strict run results,
+structured recovery reports, shutdown behavior and diagnostic bundles.
 Contribution and disclosure guidance are in [CONTRIBUTING.md](CONTRIBUTING.md)
 and [SECURITY.md](SECURITY.md). Maintainer publication steps are documented in
 [the release guide](docs/releasing.md).

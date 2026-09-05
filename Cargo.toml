@@ -140,12 +140,14 @@ windows-core       = "0.62.2"
 windows-task       = { version = "0.1.0", path = "crates/windows-task" }
 windows-task-macros = { version = "0.1.0", path = "crates/windows-task-macros" }
 zeroize            = { version = "1.8", features = ["derive"] }
+tracing            = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 [profile.release]
 lto           = "thin"
 codegen-units = 1
 strip         = "symbols"
-panic         = "abort"
+panic         = "unwind"
 opt-level     = 3
 
 [profile.bench]

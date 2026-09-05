@@ -14,6 +14,8 @@ use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use uuid::Uuid;
 
+mod verification;
+
 /// `cargo xtask` CLI surface.
 #[derive(Debug, Parser)]
 #[command(name = "xtask", version, about = "windows-task development automation")]
@@ -26,8 +28,24 @@ struct Cli {
 /// Available subcommands.
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Scan source safety rules without requiring a Unix shell.
+    StrictCode,
+    /// Save platform-specific coverage without conflating compile-only targets.
+    Coverage,
     /// Run formatting, Clippy, tests, and Windows cross-target checks.
-    Ci,
+    Ci {
+        /// Select native mutation tests only on a disposable Windows host.
+        #[arg(long, value_enum, default_value_t = verification::Suite::Portable)]
+        suite: verification::Suite,
+    },
+    /// Run recorded test suites without disguising skipped native tests as passes.
+    Test {
+        /// Suite to execute. Native mutation tests require a disposable Windows host.
+        #[arg(long, value_enum, default_value_t = verification::Suite::Portable)]
+        suite: verification::Suite,
+    },
+    /// Build isolated consumers from the actual publishable crate archives.
+    Package,
     /// Check the library and CLI for supported Windows architectures.
     CheckWindows {
         /// Architecture selection.
@@ -120,20 +138,11 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        Command::Ci => {
-            cargo(&["fmt", "--all", "--", "--check"])?;
-            cargo(&[
-                "clippy",
-                "--workspace",
-                "--all-targets",
-                "--all-features",
-                "--",
-                "-D",
-                "warnings",
-            ])?;
-            cargo(&["test", "--workspace", "--all-features"])?;
-            check_windows(Architecture::All)
-        }
+        Command::StrictCode => verification::strict_code(),
+        Command::Coverage => verification::coverage(),
+        Command::Ci { suite } => verification::ci(suite),
+        Command::Test { suite } => verification::test(suite),
+        Command::Package => verification::package(),
         Command::CheckWindows { architecture } => check_windows(architecture),
         Command::Msrv => {
             cargo(&["check", "--workspace", "--all-targets", "--all-features"])?;

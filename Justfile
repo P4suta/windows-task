@@ -1,4 +1,5 @@
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
+set windows-shell := ["pwsh", "-NoLogo", "-NoProfile", "-Command"]
 set dotenv-load := false
 
 # Tooling is provisioned by mise (mise.toml + .config/mise/config.toml);
@@ -15,7 +16,6 @@ set dotenv-load := false
 # Portable code is covered on Linux; native COM/Event Log paths are exercised
 # by the Windows smoke job. Keep coverage informative until the two reports can
 # be merged without pretending the platform-specific half is untested.
-COVERAGE_FLOOR := "70"
 
 default:
     @just --list --unsorted
@@ -75,21 +75,7 @@ markdownlint:
 
 # Reject patterns that mask real bugs even when type / lint gates pass.
 strict-code:
-    @echo "::group::strict-code"
-    command -v rg >/dev/null || (echo "ripgrep is required for strict-code" && exit 1)
-    ! rg -n '\b(TODO|FIXME)\b' --glob '*.rs' --glob '!target/**' . \
-        | rg -v '\(#[0-9]+\)' \
-        || (echo "bare TODO/FIXME — add (#NN) issue link" && exit 1)
-    ! rg -n '#\[allow\([a-z_:]+\)\]' --glob '*.rs' --glob '!target/**' . \
-        || (echo "#[allow(...)] missing reason = \"...\"" && exit 1)
-    ! rg -n '\bunsafe[[:space:]]*\{' --glob '*.rs' --glob '!target/**' \
-        --glob '!crates/windows-task/src/client/sys.rs' \
-        --glob '!crates/windows-task/src/credentials.rs' \
-        --glob '!crates/windows-task/src/handler.rs' . \
-        || (echo "unsafe block outside an audited Windows boundary" && exit 1)
-    ! rg -n '#!\[feature\(' --glob '*.rs' --glob '!target/**' . \
-        || (echo "#![feature(...)] requires nightly — not allowed" && exit 1)
-    @echo "::endgroup::"
+    cargo xtask strict-code
 
 lint: fmt-check clippy typos actionlint yamllint markdownlint strict-code
 
@@ -98,7 +84,7 @@ lint: fmt-check clippy typos actionlint yamllint markdownlint strict-code
 # ---------------------------------------------------------------------------
 
 test:
-    cargo test --workspace --all-features
+    cargo xtask test --suite portable
 
 test-doc:
     cargo test --workspace --all-features --doc
@@ -109,9 +95,7 @@ docs:
         --all-features --no-deps
 
 coverage:
-    mise exec github:taiki-e/cargo-llvm-cov -- cargo llvm-cov --workspace \
-        --fail-under-regions {{COVERAGE_FLOOR}} \
-        --summary-only
+    cargo xtask coverage
 
 audit:
     mise exec github:EmbarkStudios/cargo-deny -- cargo-deny check
@@ -123,12 +107,11 @@ windows-check:
     cargo xtask check-windows
 
 package:
-    cargo package -p windows-task-macros
-    cargo package -p windows-task --list
-    cargo package -p windows-task-cli --list
+    cargo xtask package
 
 # ---------------------------------------------------------------------------
 # Aggregate
 # ---------------------------------------------------------------------------
 
-ci: lint test test-doc docs audit windows-check
+ci:
+    cargo xtask ci

@@ -73,7 +73,7 @@ and all named payload fields remain available. This lets newer Windows versions
 add fields or IDs without data loss.
 
 Exact run completion requires an instance GUID in Operational history. The
-polling fallback reads `LastTaskResult` only after the requested instance is no
+opt-in polling fallback reads `LastTaskResult` only after the requested instance is no
 longer observed and a grace interval has passed; its confidence is explicitly
 `PollingFallback` because another run can race that property.
 
@@ -88,4 +88,5 @@ threads.
 Pause, resume, and stop are cooperative. A handler that ignores
 `HandlerControl` cannot be safely terminated by Rust code. Panics are contained
 within the user worker, reported as failure, and do not unwind across the COM
-ABI.
+ABI when built with `panic = "unwind"`. Downstream `panic = "abort"` cannot be
+caught and terminates the host process.

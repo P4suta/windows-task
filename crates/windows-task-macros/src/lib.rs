@@ -68,6 +68,11 @@ pub fn handler(arguments: TokenStream, item: TokenStream) -> TokenStream {
     quote! {
         #implementation
 
+        const _: fn() = {
+            fn assert_handler<T: ::windows_task::handler::TaskHandler>() {}
+            assert_handler::<#handler_type>
+        };
+
         #[doc(hidden)]
         pub const WINDOWS_TASK_HANDLER_CLSID: &str = #clsid;
 

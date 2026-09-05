@@ -15,7 +15,10 @@ principal secrets cannot be read back for rollback.
 ## Decision
 
 Give each manifest a stable owner UUID and namespace. Encode a deterministic
-owner/task marker in `RegistrationInfo.URI`. Refuse unowned collisions unless
+owner/task marker in `RegistrationInfo.Source`, preserving original Source text
+after a newline. The original URI-only decision was superseded after native
+verification showed Windows rewrites URI to the task path; legacy URI markers
+are recognized when still present. Refuse unowned collisions unless
 adoption is explicit, and prune only matching owner markers when pruning is
 explicit.
 

@@ -106,6 +106,20 @@ pub enum ResultConfidence {
     PollingFallback,
 }
 
+/// Why an explicitly permitted estimate was used instead of exact completion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(Serialize, Deserialize),
+    serde(rename_all = "snake_case")
+)]
+pub enum FallbackReason {
+    /// The Operational channel could not be queried.
+    HistoryUnavailable,
+    /// No matching completion arrived within the polling grace interval.
+    CompletionNotObserved,
+}
+
 /// Final result observed for a task run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(
@@ -120,6 +134,9 @@ pub struct RunOutcome {
     pub result_code: i32,
     /// How confidently this result identifies the requested run.
     pub confidence: ResultConfidence,
+    /// Present only for polling estimates.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub fallback_reason: Option<FallbackReason>,
 }
 
 /// Decodes one XML document rendered by `EvtRender(EvtRenderEventXml)`.
@@ -244,7 +261,15 @@ pub fn from_event_xml(xml: &str) -> Result<HistoryEvent> {
                     _ => {}
                 }
             }
-            Event::DocType(_) | Event::GeneralRef(_) => {
+            Event::GeneralRef(reference) => {
+                let value = crate::xml::resolve_reference(reference.as_ref())
+                    .map_err(|error| history_xml_error(error.message()))?;
+                let frame = stack
+                    .last_mut()
+                    .ok_or_else(|| history_xml_error("reference outside XML root"))?;
+                frame.text.push_str(&value);
+            }
+            Event::DocType(_) => {
                 return Err(history_xml_error(
                     "DTD declarations and entity references are not allowed",
                 ));

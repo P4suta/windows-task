@@ -87,7 +87,7 @@ pub struct ManagedTask {
 pub struct TaskManifest {
     /// Must equal [`FORMAT_VERSION`].
     pub format_version: u32,
-    /// Stable owner UUID encoded into managed task registration URIs.
+    /// Stable owner UUID encoded into managed task registration Source markers.
     pub owner: Uuid,
     /// Human-readable owner or application name.
     pub owner_name: String,
@@ -161,7 +161,9 @@ impl TaskManifest {
                     "manifest version {} is unsupported; expected {FORMAT_VERSION}",
                     self.format_version
                 ),
-                remediation: None,
+                remediation: Some(format!(
+                    "Use format_version = {FORMAT_VERSION} and migrate unsupported fields."
+                )),
             });
         }
         if self.namespace.is_root() {
@@ -234,7 +236,7 @@ fn outside_namespace(path: String) -> Diagnostic {
         code: DiagnosticCode::OwnershipConflict,
         path,
         message: "path is outside the managed namespace".into(),
-        remediation: None,
+        remediation: Some("Move the path under this manifest's namespace.".into()),
     }
 }
 
@@ -244,7 +246,7 @@ fn duplicate_path(path: String) -> Diagnostic {
         code: DiagnosticCode::DuplicateId,
         path,
         message: "path appears more than once".into(),
-        remediation: None,
+        remediation: Some("Remove the duplicate entry or use a distinct path.".into()),
     }
 }
 
@@ -264,7 +266,19 @@ fn percent_encode(value: &str) -> String {
 }
 
 fn serialization_error(message: impl Into<String>) -> Error {
-    Error::new(ErrorKind::Serialization, message)
+    let message = message.into();
+    Error::new(ErrorKind::Serialization, message.clone()).with_validation(ValidationReport {
+        diagnostics: vec![Diagnostic {
+            level: DiagnosticLevel::Error,
+            code: DiagnosticCode::Other("manifest_syntax".into()),
+            path: "$".into(),
+            message,
+            remediation: Some(
+                "Check the format, reported location, field types and the 8 MiB input limit."
+                    .into(),
+            ),
+        }],
+    })
 }
 
 #[cfg(test)]

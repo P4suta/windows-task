@@ -1,0 +1,27 @@
+[package]
+name = "windows-task-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+windows-task = { path = "../crates/windows-task" }
+
+[[bin]]
+name = "input_boundaries"
+path = "fuzz_targets/input_boundaries.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "seed-replay"
+path = "src/seed_replay.rs"
+test = false
+doc = false

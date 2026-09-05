@@ -3,6 +3,10 @@
 Thank you for considering a contribution. Notes on the parts that are
 easy to get wrong on a first pass:
 
+Correctness, reproducibility and diagnostic evidence take priority over delivery
+speed. See [the verification guide](docs/verification.md) for recorded commands,
+fault tests, native isolation and the interpretation of incomplete checks.
+
 ## Development environment
 
 Rust 1.85 is the minimum supported version. `mise` installs the pinned

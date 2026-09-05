@@ -5,6 +5,13 @@ use std::{
     fmt,
 };
 
+mod backend;
+#[cfg(test)]
+mod fault_tests;
+mod recovery;
+use backend::Backend;
+use recovery::{Observed, Undo, compensate_observed, observe, record};
+
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
@@ -89,9 +96,28 @@ pub struct PlannedChange {
 pub struct Plan {
     /// Desired changes in apply order.
     pub changes: Vec<PlannedChange>,
+    /// Planned instance-stop requests cannot be undone by restoring definitions.
+    #[serde(default)]
+    pub irreversible_effects: Vec<TaskPath>,
 }
 
 impl Plan {
+    /// Includes the irreversible stop requests that `ApplyOptions::stop_running`
+    /// would issue for this plan, without making any scheduler calls.
+    #[must_use]
+    pub fn with_stop_running(mut self) -> Self {
+        self.irreversible_effects = self
+            .changes
+            .iter()
+            .filter_map(|planned| match &planned.change {
+                Change::UpdateTask(path) | Change::AdoptTask(path) | Change::DeleteTask(path) => {
+                    Some(path.clone())
+                }
+                _ => None,
+            })
+            .collect();
+        self
+    }
     /// Whether current state already matches desired state.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -101,9 +127,11 @@ impl Plan {
     /// Whether any change needs extra input or cannot be compensated.
     #[must_use]
     pub fn contains_irreversible_changes(&self) -> bool {
-        self.changes
-            .iter()
-            .any(|change| change.rollback != RollbackSafety::Reversible)
+        !self.irreversible_effects.is_empty()
+            || self
+                .changes
+                .iter()
+                .any(|change| change.rollback != RollbackSafety::Reversible)
     }
 }
 
@@ -116,7 +144,7 @@ pub struct CurrentTask {
     pub definition: TaskDefinition,
     /// Effective enabled state.
     pub enabled: bool,
-    /// Whether the ownership URI matches this manifest.
+    /// Whether the Source marker or a preserved legacy URI matches this manifest.
     pub owned: bool,
     /// Whether rollback needs a password.
     pub password_backed: bool,
@@ -136,12 +164,51 @@ pub struct CurrentState {
 pub struct PlanOptions {
     /// Delete owned tasks absent from desired state.
     pub prune: bool,
-    /// Permit replacing an existing task without this manifest's ownership URI.
+    /// Permit replacing an existing task without this manifest's ownership marker.
     pub adopt: bool,
 }
 
 /// Inspects the complete managed namespace without changing it.
 pub fn inspect(scheduler: &BlockingScheduler, manifest: &TaskManifest) -> Result<CurrentState> {
+    inspect_backend(&backend::Native(scheduler), manifest)
+}
+
+/// Plans against the connected scheduler after resolving native principal and
+/// SDDL representations. Does not register tasks or change permissions.
+pub fn plan_live(
+    scheduler: &BlockingScheduler,
+    manifest: &TaskManifest,
+    options: PlanOptions,
+) -> Result<Plan> {
+    let manifest = normalize_manifest(scheduler, manifest)?;
+    plan_state(&manifest, &inspect(scheduler, &manifest)?, options)
+}
+
+fn normalize_manifest(
+    scheduler: &BlockingScheduler,
+    manifest: &TaskManifest,
+) -> Result<TaskManifest> {
+    ensure_valid_manifest(manifest)?;
+    let mut manifest = manifest.clone();
+    for task in &mut manifest.tasks {
+        task.definition = scheduler.normalize_definition(task.definition.clone())?;
+        if let Some(descriptor) = task.definition.registration.security_descriptor.take() {
+            let information = security_information_for_sddl(&descriptor);
+            task.definition.registration.security_descriptor =
+                Some(scheduler.normalize_security(descriptor, information)?);
+        }
+    }
+    for folder in &mut manifest.folders {
+        if let Some(descriptor) = folder.security_descriptor.take() {
+            let information = security_information_for_sddl(&descriptor);
+            folder.security_descriptor =
+                Some(scheduler.normalize_security(descriptor, information)?);
+        }
+    }
+    Ok(manifest)
+}
+
+fn inspect_backend(scheduler: &impl Backend, manifest: &TaskManifest) -> Result<CurrentState> {
     ensure_valid_manifest(manifest)?;
     let list_options = ListOptions {
         recursive: true,
@@ -182,7 +249,17 @@ pub fn inspect(scheduler: &BlockingScheduler, manifest: &TaskManifest) -> Result
             );
         }
         let expected_uri = manifest.ownership_uri(&task.path);
-        let owned = definition.registration.uri.as_deref() == Some(expected_uri.as_str());
+        let owned = definition.registration.uri.as_deref() == Some(expected_uri.as_str())
+            || definition
+                .registration
+                .source
+                .as_deref()
+                .is_some_and(|source| {
+                    source == expected_uri
+                        || source
+                            .strip_prefix(&expected_uri)
+                            .is_some_and(|suffix| suffix.starts_with('\n'))
+                });
         let password_backed = password_backed(definition.principal.logon_type);
         tasks.push(CurrentTask {
             path: task.path,
@@ -277,7 +354,7 @@ pub fn plan_state(
                         .registration
                         .security_descriptor
                         .as_ref()
-                        != Some(desired_security)
+                        .is_none_or(|actual| !actual.access_equivalent(desired_security))
                     {
                         changes.push(PlannedChange {
                             change: Change::SetTaskSecurity(desired.path.clone()),
@@ -292,7 +369,7 @@ pub fn plan_state(
     for desired in &manifest.folders {
         if let Some(descriptor) = &desired.security_descriptor {
             let current_descriptor = current.folders.get(&desired.path).and_then(Option::as_ref);
-            if current_descriptor != Some(descriptor) {
+            if current_descriptor.is_none_or(|actual| !actual.access_equivalent(descriptor)) {
                 changes.push(PlannedChange {
                     change: Change::SetFolderSecurity(desired.path.clone()),
                     rollback: RollbackSafety::Reversible,
@@ -315,7 +392,10 @@ pub fn plan_state(
         }
     }
     changes.sort_by(|left, right| change_order(&left.change).cmp(&change_order(&right.change)));
-    Ok(Plan { changes })
+    Ok(Plan {
+        changes,
+        irreversible_effects: Vec::new(),
+    })
 }
 
 /// Why a password is being requested during apply preflight.
@@ -418,7 +498,69 @@ pub struct ApplyReport {
     /// Applied changes successfully compensated after a failure.
     pub rolled_back: Vec<Change>,
     /// Compensation errors; non-empty means the final state is uncertain.
-    pub rollback_failures: Vec<String>,
+    pub rollback_failures: Vec<RollbackFailure>,
+    /// Ordered observations, including uncertain and partially completed operations.
+    pub journal: Vec<JournalEntry>,
+    /// Changes whose final state could not be safely established or restored.
+    pub unresolved: Vec<Change>,
+    /// Stop requests cannot be undone by restoring a task definition.
+    pub irreversible_effects: Vec<TaskPath>,
+}
+
+/// One phase of an apply or compensation operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplyPhase {
+    /// Compare live state immediately before mutation.
+    Precondition,
+    /// Stop existing instances (irreversible).
+    Stop,
+    /// Mutate the task or folder.
+    Mutation,
+    /// Read back state after an attempt, including a lost response.
+    Verify,
+    /// Compensate a previously attempted mutation.
+    Rollback,
+}
+
+/// What has been established for a journaled operation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StepOutcome {
+    /// The operation is about to be invoked.
+    Attempted,
+    /// The operation returned successfully.
+    Succeeded,
+    /// The operation failed without a confirmed final state.
+    Failed,
+    /// A mutation may have happened but cannot safely be attributed or restored.
+    Unknown,
+}
+
+/// Structured apply evidence. Errors retain native codes and diagnostic fields.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct JournalEntry {
+    /// Specific backend operation, or the outer observation phase.
+    pub operation: String,
+    /// Semantic change being processed.
+    pub change: Change,
+    /// Execution phase.
+    pub phase: ApplyPhase,
+    /// Observed outcome.
+    pub outcome: StepOutcome,
+    /// Original error, when applicable.
+    pub error: Option<Error>,
+}
+
+/// A compensation failure that can be inspected without parsing prose.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RollbackFailure {
+    /// Change requiring recovery.
+    pub change: Change,
+    /// Phase where recovery failed.
+    pub phase: ApplyPhase,
+    /// Original classified error.
+    pub error: Error,
 }
 
 impl ApplyReport {
@@ -428,6 +570,7 @@ impl ApplyReport {
         self.applied.len() == self.plan.changes.len()
             && self.rolled_back.is_empty()
             && self.rollback_failures.is_empty()
+            && self.unresolved.is_empty()
     }
 
     /// Whether compensation restored every already-applied change.
@@ -436,6 +579,8 @@ impl ApplyReport {
         !self.applied.is_empty()
             && self.rolled_back.len() == self.applied.len()
             && self.rollback_failures.is_empty()
+            && self.unresolved.is_empty()
+            && self.irreversible_effects.is_empty()
     }
 }
 
@@ -487,7 +632,19 @@ pub fn apply_with_credentials(
     options: ApplyOptions,
     resolver: &mut dyn CredentialResolver,
 ) -> std::result::Result<ApplyReport, ApplyFailure> {
-    let state = inspect(scheduler, manifest).map_err(empty_apply_failure)?;
+    crate::observe::Operation::new("apply").scope(|| {
+        let manifest = normalize_manifest(scheduler, manifest).map_err(empty_apply_failure)?;
+        apply_backend(&backend::Native(scheduler), &manifest, options, resolver)
+    })
+}
+
+fn apply_backend(
+    scheduler: &impl Backend,
+    manifest: &TaskManifest,
+    options: ApplyOptions,
+    resolver: &mut dyn CredentialResolver,
+) -> std::result::Result<ApplyReport, ApplyFailure> {
+    let state = inspect_backend(scheduler, manifest).map_err(empty_apply_failure)?;
     let plan = plan_state(
         manifest,
         &state,
@@ -497,14 +654,49 @@ pub fn apply_with_credentials(
         },
     )
     .map_err(empty_apply_failure)?;
+    let plan = if options.stop_running {
+        plan.with_stop_running()
+    } else {
+        plan
+    };
     let mut report = ApplyReport {
         plan: plan.clone(),
         applied: Vec::new(),
         rolled_back: Vec::new(),
         rollback_failures: Vec::new(),
+        journal: Vec::new(),
+        unresolved: Vec::new(),
+        irreversible_effects: Vec::new(),
     };
     if plan.is_empty() {
         return Ok(report);
+    }
+    let mut expected = plan
+        .changes
+        .iter()
+        .map(|planned| {
+            observe(
+                scheduler,
+                manifest,
+                &planned.change,
+                options.allow_irreversible,
+            )
+        })
+        .collect::<Result<Vec<_>>>()
+        .map_err(|cause| ApplyFailure {
+            cause,
+            report: report.clone(),
+        })?;
+    for (planned, observed) in plan.changes.iter().zip(&expected) {
+        if !recovery::agrees_with_inspection(&state, &planned.change, observed) {
+            return Err(ApplyFailure {
+                cause: Error::new(
+                    ErrorKind::Conflict,
+                    "state changed between planning and preflight",
+                ),
+                report,
+            });
+        }
     }
     let mut prepared = prepare(
         scheduler,
@@ -518,14 +710,205 @@ pub fn apply_with_credentials(
         report: report.clone(),
     })?;
 
-    for planned in &plan.changes {
-        if let Err(cause) =
-            execute_change(scheduler, manifest, &planned.change, options, &mut prepared)
-        {
-            compensate(scheduler, options, &mut prepared, &mut report);
+    let mut undo = Vec::new();
+    for (index, planned) in plan.changes.iter().enumerate() {
+        let change = &planned.change;
+        let before = expected[index].clone();
+        let precondition = observe(scheduler, manifest, change, options.allow_irreversible)
+            .and_then(|live| {
+                if live == before {
+                    Ok(())
+                } else {
+                    Err(Error::new(
+                        ErrorKind::Conflict,
+                        "state changed during preflight",
+                    ))
+                }
+            });
+        record(
+            &mut report,
+            change,
+            ApplyPhase::Precondition,
+            if precondition.is_ok() {
+                StepOutcome::Succeeded
+            } else {
+                StepOutcome::Failed
+            },
+            precondition.as_ref().err().cloned(),
+        );
+        if let Err(cause) = precondition {
+            compensate_observed(
+                scheduler,
+                manifest,
+                options,
+                &mut prepared,
+                &mut report,
+                undo,
+            );
             return Err(ApplyFailure { cause, report });
         }
-        report.applied.push(planned.change.clone());
+        if let Change::SetFolderSecurity(path) = change {
+            if let Observed::Folder(Some(descriptor)) = &before {
+                prepared
+                    .folder_security
+                    .entry(path.clone())
+                    .or_insert_with(|| SecuritySnapshot {
+                        descriptor: descriptor.clone(),
+                        information: SecurityInformation::OWNER
+                            | SecurityInformation::GROUP
+                            | SecurityInformation::DACL,
+                    });
+            }
+        }
+        if options.stop_running
+            && matches!(
+                change,
+                Change::UpdateTask(_) | Change::AdoptTask(_) | Change::DeleteTask(_)
+            )
+        {
+            let path = recovery::task_path(change).expect("task mutation has a path");
+            report.irreversible_effects.push(path.clone());
+            record(
+                &mut report,
+                change,
+                ApplyPhase::Stop,
+                StepOutcome::Attempted,
+                None,
+            );
+            let result = scheduler.stop_all(path);
+            record(
+                &mut report,
+                change,
+                ApplyPhase::Stop,
+                if result.is_ok() {
+                    StepOutcome::Succeeded
+                } else {
+                    StepOutcome::Unknown
+                },
+                result.as_ref().err().cloned(),
+            );
+            if let Err(cause) = result {
+                compensate_observed(
+                    scheduler,
+                    manifest,
+                    options,
+                    &mut prepared,
+                    &mut report,
+                    undo,
+                );
+                return Err(ApplyFailure { cause, report });
+            }
+        }
+        record(
+            &mut report,
+            change,
+            ApplyPhase::Mutation,
+            StepOutcome::Attempted,
+            None,
+        );
+        let native_journal = std::cell::RefCell::new(Vec::new());
+        let recorded = backend::Recorded {
+            inner: scheduler,
+            change,
+            phase: ApplyPhase::Mutation,
+            journal: &native_journal,
+        };
+        let result = crate::observe::Operation::new("apply.change").run(|| {
+            execute_change(
+                &recorded,
+                manifest,
+                change,
+                ApplyOptions {
+                    stop_running: false,
+                    ..options
+                },
+                &mut prepared,
+            )
+        });
+        report.journal.extend(native_journal.into_inner());
+        record(
+            &mut report,
+            change,
+            ApplyPhase::Mutation,
+            if result.is_ok() {
+                StepOutcome::Succeeded
+            } else {
+                StepOutcome::Unknown
+            },
+            result.as_ref().err().cloned(),
+        );
+        let observed = observe(scheduler, manifest, change, options.allow_irreversible);
+        let mut cause = result.as_ref().err().cloned();
+        match observed {
+            Ok(after) if after == before && result.is_err() => {
+                record(
+                    &mut report,
+                    change,
+                    ApplyPhase::Verify,
+                    StepOutcome::Succeeded,
+                    None,
+                );
+            }
+            Ok(after)
+                if recovery::expected_after(scheduler, &before, &after, manifest, change)
+                    && (result.is_ok()
+                        || matches!(
+                            change,
+                            Change::CreateTask(_)
+                                | Change::UpdateTask(_)
+                                | Change::AdoptTask(_)
+                                | Change::DeleteTask(_)
+                                | Change::SetEnabled { .. }
+                        )) =>
+            {
+                record(
+                    &mut report,
+                    change,
+                    ApplyPhase::Verify,
+                    StepOutcome::Succeeded,
+                    None,
+                );
+                report.applied.push(change.clone());
+                for (later, expected) in plan.changes.iter().zip(&mut expected).skip(index + 1) {
+                    if recovery::same_target(change, &later.change) {
+                        *expected = after.clone();
+                    }
+                }
+                undo.push(Undo {
+                    change: change.clone(),
+                    before,
+                    after,
+                });
+            }
+            observed => {
+                let error = observed.err().unwrap_or_else(|| {
+                    Error::new(
+                        ErrorKind::Conflict,
+                        "post-mutation state cannot safely be attributed to this apply",
+                    )
+                });
+                record(
+                    &mut report,
+                    change,
+                    ApplyPhase::Verify,
+                    StepOutcome::Unknown,
+                    Some(error.clone()),
+                );
+                report.unresolved.push(change.clone());
+                cause.get_or_insert(error);
+            }
+        }
+        if let Some(cause) = cause {
+            compensate_observed(
+                scheduler,
+                manifest,
+                options,
+                &mut prepared,
+                &mut report,
+                undo,
+            );
+            return Err(ApplyFailure { cause, report });
+        }
     }
     Ok(report)
 }
@@ -554,7 +937,7 @@ struct SecuritySnapshot {
 }
 
 fn prepare(
-    scheduler: &BlockingScheduler,
+    scheduler: &impl Backend,
     manifest: &TaskManifest,
     plan: &Plan,
     allow_irreversible: bool,
@@ -575,9 +958,8 @@ fn prepare(
             })
             .collect(),
     };
-    let security_information =
-        SecurityInformation::OWNER | SecurityInformation::GROUP | SecurityInformation::DACL;
     for planned in &plan.changes {
+        let security_information = recovery::information(manifest, &planned.change);
         match &planned.change {
             Change::CreateTask(path) | Change::UpdateTask(path) | Change::AdoptTask(path) => {
                 let desired = managed_task(manifest, path)?;
@@ -684,7 +1066,7 @@ fn prepare(
 }
 
 fn prepare_task_backup(
-    scheduler: &BlockingScheduler,
+    scheduler: &impl Backend,
     manifest: &TaskManifest,
     path: &TaskPath,
     allow_irreversible: bool,
@@ -734,7 +1116,7 @@ fn prepare_task_backup(
 }
 
 fn execute_change(
-    scheduler: &BlockingScheduler,
+    scheduler: &impl Backend,
     manifest: &TaskManifest,
     change: &Change,
     options: ApplyOptions,
@@ -767,9 +1149,13 @@ fn execute_change(
                 },
                 ignore_registration_triggers: options.ignore_registration_triggers,
                 password: prepared.desired_passwords.remove(path),
+                dont_add_principal_ace: definition.registration.security_descriptor.is_some(),
                 ..RegistrationOptions::default()
             };
             scheduler.register(path, definition, registration)?;
+            // Read-back is a separate journaled boundary. A failure here must
+            // still compensate the registration that has already committed.
+            scheduler.get_task(path)?;
         }
         Change::DeleteTask(path) => {
             if options.stop_running {
@@ -815,25 +1201,8 @@ fn execute_change(
     Ok(())
 }
 
-fn compensate(
-    scheduler: &BlockingScheduler,
-    options: ApplyOptions,
-    prepared: &mut PreparedApply,
-    report: &mut ApplyReport,
-) {
-    let applied: Vec<_> = report.applied.iter().rev().cloned().collect();
-    for change in applied {
-        match compensate_change(scheduler, &change, options, prepared) {
-            Ok(()) => report.rolled_back.push(change),
-            Err(error) => report
-                .rollback_failures
-                .push(format!("{change:?}: {error}")),
-        }
-    }
-}
-
 fn compensate_change(
-    scheduler: &BlockingScheduler,
+    scheduler: &impl Backend,
     change: &Change,
     options: ApplyOptions,
     prepared: &mut PreparedApply,
@@ -872,11 +1241,13 @@ fn compensate_change(
                     ..RegistrationOptions::default()
                 },
             )?;
-            scheduler.set_enabled(path, backup.enabled)?;
-            if let Some(security) = backup.security {
-                scheduler.set_task_security(path, security.descriptor, security.information)?;
-            }
-            Ok(())
+            let enabled_result = scheduler.set_enabled(path, backup.enabled);
+            let security_result = backup.security.map_or(Ok(()), |security| {
+                scheduler.set_task_security(path, security.descriptor, security.information)
+            });
+            // ACL recovery is independent of enabled-state restoration. Both
+            // attempts are retained by the recording backend even if one fails.
+            enabled_result.and(security_result)
         }
         Change::SetEnabled { path, .. } => {
             let enabled = prepared.enabled_backups.get(path).ok_or_else(|| {
@@ -899,9 +1270,6 @@ fn compensate_change(
             scheduler.set_task_security(path, security.descriptor.clone(), security.information)
         }
         Change::SetFolderSecurity(path) => {
-            if prepared.created_folders.contains(path) {
-                return Ok(());
-            }
             let security = prepared.folder_security.remove(path).ok_or_else(|| {
                 Error::new(
                     ErrorKind::Irreversible,
@@ -922,18 +1290,23 @@ fn empty_apply_failure(cause: Error) -> ApplyFailure {
             applied: Vec::new(),
             rolled_back: Vec::new(),
             rollback_failures: Vec::new(),
+            journal: Vec::new(),
+            unresolved: Vec::new(),
+            irreversible_effects: Vec::new(),
         },
     }
 }
 
 fn ensure_valid_manifest(manifest: &TaskManifest) -> Result<()> {
-    if manifest.validate().is_valid() {
+    let report = manifest.validate();
+    if report.is_valid() {
         Ok(())
     } else {
         Err(Error::new(
             ErrorKind::InvalidDefinition,
             "desired-state manifest is invalid",
-        ))
+        )
+        .with_validation(report))
     }
 }
 
@@ -953,7 +1326,16 @@ fn managed_task<'a>(manifest: &'a TaskManifest, path: &TaskPath) -> Result<&'a M
 
 fn owned_definition(manifest: &TaskManifest, task: &ManagedTask) -> TaskDefinition {
     let mut definition = task.definition.clone();
-    definition.registration.uri = Some(manifest.ownership_uri(&task.path));
+    let marker = manifest.ownership_uri(&task.path);
+    definition.registration.source = Some(
+        definition
+            .registration
+            .source
+            .as_ref()
+            .map_or_else(|| marker.clone(), |source| format!("{marker}\n{source}")),
+    );
+    // Windows rewrites URI to the registered task path. Source is preserved.
+    definition.registration.uri = Some(task.path.to_string());
     definition
 }
 
@@ -1128,7 +1510,8 @@ mod tests {
         });
 
         let mut existing = desired;
-        existing.registration.uri = Some(manifest.ownership_uri(&task_path));
+        existing.registration.uri = Some(task_path.to_string());
+        existing.registration.source = Some(manifest.ownership_uri(&task_path));
         existing.registration.security_descriptor =
             Some(SecurityDescriptor::from_sddl("D:(A;;GA;;;SY)").expect("existing SDDL"));
         existing.settings.enabled = false;

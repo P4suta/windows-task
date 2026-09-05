@@ -111,7 +111,8 @@ pub struct RegistrationInfo {
     pub source: Option<String>,
     /// Version of the task definition.
     pub version: Option<String>,
-    /// Unique registration URI. Reconcile reserves this for ownership markers.
+    /// Registration URI. Windows can rewrite this to the task path; reconcile
+    /// stores ownership in Source and accepts legacy URI markers when present.
     pub uri: Option<String>,
     /// Optional task security descriptor.
     pub security_descriptor: Option<SecurityDescriptor>,
@@ -127,6 +128,24 @@ pub struct RegistrationInfo {
 pub struct SecurityDescriptor(String);
 
 impl SecurityDescriptor {
+    #[cfg(all(feature = "client", any(windows, feature = "reconcile", test)))]
+    pub(crate) fn access_equivalent(&self, other: &Self) -> bool {
+        fn key(value: &str) -> String {
+            // Normalize only the Windows auto-inheritance status bit. Preserve
+            // protection, requested inheritance, ACE flags and ACE ordering.
+            // Conditional expressions are opaque and are compared verbatim.
+            if value.contains(['\'', '"']) {
+                return value.into();
+            }
+            value
+                .replace("D:PAI(", "D:P(")
+                .replace("D:AI(", "D:(")
+                .replace("S:PAI(", "S:P(")
+                .replace("S:AI(", "S:(")
+        }
+        key(self.as_sddl()) == key(other.as_sddl())
+    }
+
     /// Creates an SDDL descriptor. Native semantic validation also occurs when
     /// the descriptor is applied on Windows.
     pub fn from_sddl(value: impl Into<String>) -> Result<Self, InvalidSecurityDescriptor> {
@@ -414,4 +433,22 @@ pub(crate) fn duplicate_ids(values: impl Iterator<Item = String>) -> BTreeSet<St
         }
     }
     duplicates
+}
+
+#[cfg(all(test, feature = "client"))]
+mod security_tests {
+    use super::SecurityDescriptor;
+    #[test]
+    fn comparison_preserves_protection_rights_and_ace_order() {
+        let descriptor = |text| SecurityDescriptor::from_sddl(text).expect("fixture SDDL");
+        let expected = descriptor("D:P(A;;FA;;;SY)(D;;FR;;;BA)");
+        assert!(expected.access_equivalent(&descriptor("D:PAI(A;;FA;;;SY)(D;;FR;;;BA)")));
+        for other in [
+            "D:(A;;FA;;;SY)(D;;FR;;;BA)",
+            "D:P(D;;FR;;;BA)(A;;FA;;;SY)",
+            "D:P(A;;FR;;;SY)(D;;FR;;;BA)",
+        ] {
+            assert!(!expected.access_equivalent(&descriptor(other)));
+        }
+    }
 }

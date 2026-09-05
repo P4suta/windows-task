@@ -149,11 +149,13 @@ pub fn to_string(definition: &TaskDefinition) -> Result<String> {
 }
 
 fn encoded_string(definition: &TaskDefinition, encoding: &str) -> Result<String> {
-    if !definition.validate().is_valid() {
+    let report = definition.validate();
+    if !report.is_valid() {
         return Err(Error::new(
             ErrorKind::InvalidDefinition,
             "cannot serialize an invalid task definition",
-        ));
+        )
+        .with_validation(report));
     }
     Ok(write_definition(definition, encoding))
 }
@@ -347,7 +349,14 @@ fn parse_dom(text: &str, limits: ParseLimits) -> Result<Node> {
                     return Err(xml_error("Task XML contains multiple root elements"));
                 }
             }
-            Event::DocType(_) | Event::GeneralRef(_) => {
+            Event::GeneralRef(reference) => {
+                let value = resolve_reference(reference.as_ref())?;
+                let node = stack
+                    .last_mut()
+                    .ok_or_else(|| xml_error("reference outside XML root"))?;
+                node.text.push_str(&value);
+            }
+            Event::DocType(_) => {
                 return Err(xml_error(
                     "DTD declarations and entity references are not allowed",
                 ));
@@ -370,6 +379,16 @@ fn local_name(qualified: &[u8]) -> Result<String> {
 
 fn xml_error(message: impl Into<String>) -> Error {
     Error::new(ErrorKind::Xml, message)
+}
+
+pub(crate) fn resolve_reference(reference: &[u8]) -> Result<String> {
+    let name = std::str::from_utf8(reference).map_err(|_| xml_error("invalid XML reference"))?;
+    let escaped = format!("&{name};");
+    let decoded = unescape(&escaped).map_err(|_| xml_error("undeclared XML entity reference"))?;
+    if decoded.chars().any(|c| !matches!(c, '\t' | '\n' | '\r' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}')) {
+        return Err(xml_error("reference is not an XML 1.0 character"));
+    }
+    Ok(decoded.into_owned())
 }
 
 fn definition_from_node(root: &Node) -> Result<TaskDefinition> {
@@ -623,7 +642,7 @@ fn parse_settings(node: &Node) -> Result<TaskSettings> {
             count: required_number(restart, "Count")?,
         });
     }
-    if child_bool(node, "RunOnlyIfIdle")?.unwrap_or(false) || node.child("IdleSettings").is_some() {
+    if child_bool(node, "RunOnlyIfIdle")?.unwrap_or(false) {
         let idle = node.child("IdleSettings");
         let defaults = IdleSettings::default();
         settings.idle = Some(IdleSettings {
@@ -1243,8 +1262,11 @@ fn write_settings(definition: &TaskDefinition) -> String {
         ),
         element("Priority", &settings.priority.to_string()),
     ]);
-    if settings.use_unified_scheduling_engine {
-        children.push(bool_element("UseUnifiedSchedulingEngine", true));
+    if !matches!(definition.schema_version, TaskSchemaVersion::V1_2) {
+        children.push(bool_element(
+            "UseUnifiedSchedulingEngine",
+            settings.use_unified_scheduling_engine,
+        ));
     }
     if settings.disallow_start_on_remote_app_session {
         children.push(bool_element("DisallowStartOnRemoteAppSession", true));
@@ -1719,7 +1741,65 @@ fn escape_attribute(value: &str) -> String {
 }
 
 #[cfg(test)]
+mod schema_tests;
+
+#[cfg(test)]
 mod tests {
+    #[test]
+    fn standard_references_round_trip_without_allowing_custom_entities() {
+        for text in [
+            "A&B",
+            "<tag>",
+            "\"quotes\" & 'apostrophes'",
+            "日本語 & 🦀",
+            "&amp;",
+        ] {
+            let mut definition = TaskDefinition::new(Action::Exec(ExecAction::new("fixture.exe")));
+            definition.registration.description = Some(text.into());
+            let serialized = to_string(&definition).expect("serialize text");
+            assert_eq!(
+                from_bytes(serialized.as_bytes()).expect("parse text"),
+                definition
+            );
+            assert_eq!(
+                from_bytes(&to_utf16le(&definition).expect("UTF16")).expect("parse UTF16"),
+                definition
+            );
+        }
+        for reference in ["&#0;", "&custom;", "&#xD800;", "&#x110000;"] {
+            RawTaskXml::new(format!("<Task><Data>{reference}</Data></Task>").into_bytes())
+                .expect_err("illegal reference");
+        }
+        assert_eq!(
+            super::resolve_reference(b"#x1F980").expect("numeric reference"),
+            "🦀"
+        );
+    }
+
+    #[test]
+    fn generated_text_round_trips_and_canonical_output_is_idempotent() {
+        // Deterministic property corpus. Failures include the exact seed.
+        for seed in 0_u32..512 {
+            let text: String = (0_u32..24)
+                .map(|index| {
+                    let value =
+                        (seed.wrapping_mul(1_664_525).wrapping_add(index * 101)) % 0xD7D0 + 0x20;
+                    char::from_u32(value).expect("generated XML character")
+                })
+                .collect();
+            let mut definition = TaskDefinition::new(Action::Exec(ExecAction::new("fixture.exe")));
+            definition.registration.description = Some(format!("{text}&<>'\""));
+            let xml = to_string(&definition).expect("serialize corpus");
+            let decoded =
+                from_bytes(xml.as_bytes()).unwrap_or_else(|error| panic!("seed {seed}: {error}"));
+            assert_eq!(decoded, definition, "seed {seed}");
+            assert_eq!(
+                to_string(&decoded).expect("canonical output"),
+                xml,
+                "seed {seed}"
+            );
+        }
+    }
     use crate::model::{
         Action, ExecAction, LogonType, PrincipalIdentity, ServiceAccount, TaskDefinition,
         XmlExtension,

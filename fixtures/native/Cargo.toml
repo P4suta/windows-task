@@ -1,0 +1,21 @@
+[package]
+name = "windows-task-native-fixture"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[[bin]]
+name = "windows-task-execution-fixture"
+path = "src/main.rs"
+
+[dependencies]
+windows-task = { path = "../../crates/windows-task", features = ["handler"] }
+
+[profile.release]
+panic = "unwind"

@@ -37,7 +37,7 @@ impl Password {
         read_credential_manager(target).map(|credential| credential.password)
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "client"))]
     pub(crate) fn into_utf16(mut self) -> Zeroizing<Vec<u16>> {
         std::mem::take(&mut self.utf16)
     }
@@ -91,7 +91,7 @@ impl Credential {
         read_credential_manager(target)
     }
 
-    #[cfg(windows)]
+    #[cfg(all(windows, feature = "client"))]
     pub(crate) fn into_parts(self) -> (String, Zeroizing<Vec<u16>>) {
         (self.username, self.password.into_utf16())
     }

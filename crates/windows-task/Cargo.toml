@@ -7,7 +7,7 @@ license.workspace = true
 description.workspace = true
 repository.workspace = true
 authors.workspace = true
-readme = "../../README.md"
+readme = "README.md"
 documentation = "https://docs.rs/windows-task"
 keywords = ["windows", "task-scheduler", "automation", "com", "scheduler"]
 categories = ["os::windows-apis", "api-bindings"]
@@ -35,6 +35,7 @@ default = [
     "reconcile",
     "recipes",
     "cron",
+    "tracing",
 ]
 client = ["dep:bitflags"]
 async = ["client", "dep:futures-channel", "dep:futures-core"]
@@ -50,6 +51,7 @@ reconcile = ["client", "serde"]
 recipes = []
 cron = ["recipes"]
 handler = ["dep:windows-core", "dep:windows-task-macros"]
+tracing = ["dep:tracing"]
 
 [dependencies]
 bitflags = { workspace = true, optional = true }
@@ -65,17 +67,24 @@ toml = { workspace = true, optional = true }
 uuid = { workspace = true }
 windows-task-macros = { workspace = true, optional = true }
 zeroize = { workspace = true }
+tracing = { workspace = true, optional = true }
+
+[dev-dependencies]
+tracing-subscriber = { workspace = true }
+trybuild = "=1.0.103"
 
 [target.'cfg(windows)'.dependencies.windows]
 workspace = true
 features = [
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Security_Authorization",
     "Win32_Security_Credentials",
     "Win32_System_Com",
     "Win32_System_Com_Marshal",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_EventLog",
+    "Win32_System_LibraryLoader",
     "Win32_System_Ole",
     "Win32_System_Registry",
     "Win32_System_TaskScheduler",

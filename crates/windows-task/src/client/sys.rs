@@ -15,6 +15,8 @@ use std::{ffi::c_void, mem::ManuallyDrop};
 use std::mem::size_of;
 
 use uuid::Uuid;
+#[cfg(any(feature = "history", feature = "reconcile"))]
+use windows::core::PCWSTR;
 use windows::{
     Win32::{
         Foundation::{SYSTEMTIME, VARIANT_BOOL},
@@ -41,20 +43,21 @@ use windows::{
             },
         },
     },
-    core::{BSTR, Error as WindowsError, IUnknown, Interface},
+    core::{BSTR, Error as WindowsError, IUnknown, Interface, PWSTR},
 };
 
 #[cfg(feature = "history")]
 use windows::{
     Win32::System::EventLog::{
         EVT_HANDLE, EVT_RPC_LOGIN, EVT_VARIANT, EVT_VARIANT_0, EvtChannelConfigEnabled, EvtClose,
-        EvtFormatMessage, EvtFormatMessageEvent, EvtNext, EvtOpenChannelConfig,
-        EvtOpenPublisherMetadata, EvtOpenSession, EvtQuery, EvtQueryChannelPath,
-        EvtQueryForwardDirection, EvtQueryReverseDirection, EvtRender, EvtRenderEventXml,
-        EvtRpcLogin, EvtRpcLoginAuthNegotiate, EvtSaveChannelConfig, EvtSetChannelConfigProperty,
-        EvtVarTypeBoolean,
+        EvtCreateBookmark, EvtFormatMessage, EvtFormatMessageEvent, EvtGetChannelConfigProperty,
+        EvtNext, EvtOpenChannelConfig, EvtOpenPublisherMetadata, EvtOpenSession, EvtQuery,
+        EvtQueryChannelPath, EvtQueryForwardDirection, EvtQueryReverseDirection, EvtRender,
+        EvtRenderBookmark, EvtRenderEventXml, EvtRpcLogin, EvtRpcLoginAuthNegotiate,
+        EvtSaveChannelConfig, EvtSeek, EvtSeekRelativeToBookmark, EvtSeekStrict,
+        EvtSetChannelConfigProperty, EvtUpdateBookmark, EvtVarTypeBoolean,
     },
-    core::{BOOL, PCWSTR, PWSTR},
+    core::BOOL,
 };
 
 use crate::{
@@ -94,6 +97,45 @@ pub(super) struct Session {
 }
 
 impl Session {
+    #[cfg(feature = "reconcile")]
+    pub(super) fn normalize_definition(
+        &mut self,
+        mut definition: TaskDefinition,
+    ) -> Result<TaskDefinition> {
+        if matches!(definition.principal.identity, PrincipalIdentity::None)
+            && definition.principal.logon_type == LogonType::None
+        {
+            let info = self.connection_info()?;
+            let user = info.user.ok_or_else(|| {
+                Error::new(ErrorKind::Authentication, "connected identity unavailable")
+            })?;
+            definition.principal.identity = PrincipalIdentity::User(
+                info.domain
+                    .filter(|domain| !domain.is_empty())
+                    .map_or_else(|| user.clone(), |domain| format!("{domain}\\{user}")),
+            );
+            definition.principal.logon_type = LogonType::InteractiveToken;
+        }
+        definition.principal.identity = match definition.principal.identity {
+            PrincipalIdentity::User(name) => {
+                PrincipalIdentity::User(resolve_account(self.target.as_deref(), &name)?)
+            }
+            PrincipalIdentity::Group(name) => {
+                PrincipalIdentity::Group(resolve_account(self.target.as_deref(), &name)?)
+            }
+            identity => identity,
+        };
+        Ok(definition)
+    }
+
+    #[cfg(feature = "reconcile")]
+    pub(super) fn normalize_security(
+        &mut self,
+        descriptor: SecurityDescriptor,
+        information: SecurityInformation,
+    ) -> Result<SecurityDescriptor> {
+        canonical_sddl(&descriptor, information)
+    }
     pub(super) fn connect(input: ConnectionInput) -> Result<Self> {
         let apartment = ComApartment::initialize()?;
         let service: ITaskService =
@@ -257,6 +299,35 @@ impl Session {
                 ),
             });
         }
+        #[cfg(feature = "history")]
+        {
+            let enabled = self.event_access.enabled();
+            diagnostics.push(Diagnostic {
+                level: if enabled.as_ref().is_ok_and(|value| *value) { DiagnosticLevel::Info } else { DiagnosticLevel::Warning },
+                code: if enabled.as_ref().is_ok_and(|value| *value) { DiagnosticCode::Other("history_enabled".into()) } else { DiagnosticCode::HistoryUnavailable },
+                path: "history.configuration".into(),
+                message: match enabled {
+                    Ok(true) => "Operational channel is enabled".into(),
+                    Ok(false) => "Operational channel is disabled; new execution events will not be recorded".into(),
+                    Err(error) => format!("channel configuration unconfirmed: {:?}, native code {:?}", error.kind(), error.native_code()),
+                },
+                remediation: Some("If exact run results are required, enable Operational history explicitly and confirm read access.".into()),
+            });
+            diagnostics.push(Diagnostic {
+                level: if capabilities.history_query { DiagnosticLevel::Info } else { DiagnosticLevel::Warning },
+                code: if capabilities.history_query { DiagnosticCode::Other("history_readable".into()) } else { DiagnosticCode::HistoryUnavailable },
+                path: "history.read".into(),
+                message: if capabilities.history_query { "Event Log query opened successfully" } else { "Event Log query access is unconfirmed" }.into(),
+                remediation: Some("Check Event Log RPC reachability and channel read permissions independently of Scheduler permissions.".into()),
+            })
+        };
+        diagnostics.push(Diagnostic {
+            level: DiagnosticLevel::Info,
+            code: DiagnosticCode::Other("write_rights_not_tested".into()),
+            path: "scheduler.registration_rights".into(),
+            message: "Registration, ACL changes and rollback credentials are not tested by this read-only diagnostic".into(),
+            remediation: Some("Use an isolated test namespace to verify intended mutations before production use.".into()),
+        });
         Ok(DiagnosticReport {
             target: Some(connection.target_server),
             diagnostics,
@@ -269,8 +340,22 @@ impl Session {
     }
 
     #[cfg(feature = "history")]
+    pub(super) fn history_page(
+        &mut self,
+        query: HistoryQuery,
+        cursor: Option<super::watch::Cursor>,
+    ) -> Result<super::watch::Page> {
+        self.event_access.page(&query, cursor)
+    }
+
+    #[cfg(feature = "history")]
     pub(super) fn set_history_enabled(&mut self, enabled: bool) -> Result<()> {
         self.event_access.set_enabled(enabled)
+    }
+
+    #[cfg(feature = "history")]
+    pub(super) fn history_enabled(&mut self) -> Result<bool> {
+        self.event_access.enabled()
     }
 
     pub(super) fn validate(&mut self, definition: TaskDefinition) -> Result<ValidationReport> {
@@ -319,8 +404,23 @@ impl Session {
         path: TaskPath,
         xml: RawTaskXml,
         logon_type: LogonType,
-        mut options: RegistrationOptions,
+        options: RegistrationOptions,
     ) -> Result<RegisteredTask> {
+        self.register_raw_commit(path.clone(), xml, logon_type, options)?;
+        self.get_task(path).map_err(|error| {
+            error
+                .with_context("mutation", "registration_committed")
+                .with_context("stage", "read_back")
+        })
+    }
+
+    pub(super) fn register_raw_commit(
+        &mut self,
+        path: TaskPath,
+        xml: RawTaskXml,
+        logon_type: LogonType,
+        mut options: RegistrationOptions,
+    ) -> Result<()> {
         let definition = xml.definition()?;
         let validation = definition.validate();
         if !validation.is_valid() {
@@ -328,6 +428,7 @@ impl Session {
                 ErrorKind::InvalidDefinition,
                 "task definition failed portable validation",
             )
+            .with_validation(validation)
             .with_target(path.to_string()));
         }
         if matches!(
@@ -377,8 +478,12 @@ impl Session {
             )
         }
         .map_err(|error| self.native_for("register task", &path.to_string(), error))?;
-        configure_proxy(&registered, self.security_policy)?;
-        self.task_info(registered)
+        configure_proxy(&registered, self.security_policy).map_err(|error| {
+            error
+                .with_context("mutation", "registration_committed")
+                .with_context("stage", "configure_returned_proxy")
+        })?;
+        Ok(())
     }
 
     pub(super) fn delete_task(&mut self, path: TaskPath) -> Result<()> {
@@ -490,13 +595,11 @@ impl Session {
         configure_proxy(&collection, self.security_policy)?;
         let count = unsafe { collection.Count() }
             .map_err(|error| self.native("count running tasks", error))?;
-        (1..=count)
-            .map(|index| {
-                let running = unsafe { collection.get_Item(&VARIANT::from(index)) }
-                    .map_err(|error| self.native("read running task", error))?;
-                self.running_info(&running)
-            })
-            .collect()
+        super::collect_running_snapshots((1..=count).map(|index| {
+            let running = unsafe { collection.get_Item(&VARIANT::from(index)) }
+                .map_err(|error| self.native("read running task", error))?;
+            self.running_info(&running)
+        }))
     }
 
     pub(super) fn create_folder(
@@ -586,11 +689,16 @@ impl Session {
         descriptor: SecurityDescriptor,
         information: SecurityInformation,
     ) -> Result<()> {
+        let descriptor = canonical_sddl(&descriptor, information)?;
+        let current = self.task_security(path.clone(), information)?;
+        if canonical_sddl(&current, information)?.access_equivalent(&descriptor) {
+            return Ok(());
+        }
         let task = self.registered_task(&path)?;
         unsafe {
             task.SetSecurityDescriptor(
                 &BSTR::from(descriptor.as_sddl()),
-                i32::try_from(information.bits()).expect("security information flags fit in i32"),
+                TASK_DONT_ADD_PRINCIPAL_ACE.0,
             )
         }
         .map_err(|error| self.native_for("set task security", path.as_str(), error))
@@ -602,14 +710,14 @@ impl Session {
         descriptor: SecurityDescriptor,
         information: SecurityInformation,
     ) -> Result<()> {
-        let folder = self.folder(&path)?;
-        unsafe {
-            folder.SetSecurityDescriptor(
-                &BSTR::from(descriptor.as_sddl()),
-                i32::try_from(information.bits()).expect("security information flags fit in i32"),
-            )
+        let descriptor = canonical_sddl(&descriptor, information)?;
+        let current = self.folder_security(path.clone(), information)?;
+        if canonical_sddl(&current, information)?.access_equivalent(&descriptor) {
+            return Ok(());
         }
-        .map_err(|error| self.native_for("set folder security", path.as_str(), error))
+        let folder = self.folder(&path)?;
+        unsafe { folder.SetSecurityDescriptor(&BSTR::from(descriptor.as_sddl()), 0) }
+            .map_err(|error| self.native_for("set folder security", path.as_str(), error))
     }
 
     fn folder(&self, path: &FolderPath) -> Result<ITaskFolder> {
@@ -783,6 +891,37 @@ enum EventAccess {
 
 #[cfg(feature = "history")]
 impl EventAccess {
+    fn page(
+        &self,
+        query: &HistoryQuery,
+        cursor: Option<super::watch::Cursor>,
+    ) -> Result<super::watch::Page> {
+        let channel = BSTR::from(OPERATIONAL_CHANNEL);
+        let xpath = BSTR::from("*");
+        let result = EventHandle(
+            unsafe {
+                EvtQuery(
+                    self.session()?,
+                    &channel,
+                    &xpath,
+                    EvtQueryChannelPath.0 | EvtQueryForwardDirection.0,
+                )
+            }
+            .map_err(|error| event_error("open history continuation", error))?,
+        );
+        let bookmark_xml = cursor.as_ref().map(|cursor| BSTR::from(&cursor.bookmark));
+        let bookmark = EventHandle(
+            unsafe {
+                EvtCreateBookmark(
+                    bookmark_xml
+                        .as_ref()
+                        .map_or(PCWSTR::null(), |value| PCWSTR(value.as_ptr())),
+                )
+            }
+            .map_err(|error| event_error("create history bookmark", error))?,
+        );
+        super::watch::read_page(&mut NativePageSource { result, bookmark }, query, cursor)
+    }
     fn connect(
         target: Option<&str>,
         identity: Option<&(String, Option<String>)>,
@@ -834,7 +973,14 @@ impl EventAccess {
         const MAX_RETURNED: usize = 100_000;
         const MAX_SCANNED: usize = 100_000;
 
-        let wanted = query.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_RETURNED);
+        let wanted = query.limit.unwrap_or(DEFAULT_LIMIT);
+        if wanted > MAX_RETURNED {
+            return Err(Error::new(
+                ErrorKind::QueryLimit,
+                "history query exceeds the return limit; use a bookmark watcher",
+            )
+            .with_context("maximum", MAX_RETURNED.to_string()));
+        }
         if wanted == 0 {
             return Ok(Vec::new());
         }
@@ -854,31 +1000,11 @@ impl EventAccess {
         let mut output = Vec::with_capacity(wanted.min(256));
         let mut scanned = 0_usize;
         while output.len() < wanted && scanned < MAX_SCANNED {
-            let mut raw_events = [0_isize; 16];
-            let mut returned = 0_u32;
-            let next = unsafe {
-                EvtNext(
-                    result_set.raw(),
-                    &mut raw_events,
-                    u32::MAX,
-                    0,
-                    &raw mut returned,
-                )
-            };
-            if let Err(error) = next {
-                if is_no_more_items(&error) {
-                    break;
-                }
-                return Err(event_error("read Task Scheduler history", error));
-            }
-            if returned == 0 {
+            let events = next_events(result_set.raw(), 16.min(MAX_SCANNED - scanned))?;
+            if events.is_empty() {
                 break;
             }
-            for raw in raw_events
-                .into_iter()
-                .take(usize::try_from(returned).expect("EvtNext count fits usize"))
-            {
-                let event_handle = EventHandle(EVT_HANDLE(raw));
+            for event_handle in events {
                 scanned += 1;
                 let xml = render_event_xml(event_handle.raw())?;
                 let mut event = from_event_xml(&xml)?;
@@ -904,7 +1030,40 @@ impl EventAccess {
                 }
             }
         }
+        if scanned >= MAX_SCANNED && output.len() < wanted {
+            return Err(Error::new(
+                ErrorKind::QueryLimit,
+                "history query reached its scan limit; narrow the query",
+            ));
+        }
         Ok(output)
+    }
+
+    fn enabled(&self) -> Result<bool> {
+        let config = EventHandle(
+            unsafe { EvtOpenChannelConfig(self.session()?, &BSTR::from(OPERATIONAL_CHANNEL), 0) }
+                .map_err(|error| event_error("open history configuration", error))?,
+        );
+        let mut value = EVT_VARIANT::default();
+        let mut used = 0;
+        unsafe {
+            EvtGetChannelConfigProperty(
+                config.raw(),
+                EvtChannelConfigEnabled,
+                0,
+                u32::try_from(size_of::<EVT_VARIANT>()).expect("variant size fits u32"),
+                Some(&raw mut value),
+                &raw mut used,
+            )
+        }
+        .map_err(|error| event_error("read history enabled state", error))?;
+        if value.Type != u32::try_from(EvtVarTypeBoolean.0).expect("boolean variant type") {
+            return Err(Error::new(
+                ErrorKind::Other,
+                "unexpected channel enabled property type",
+            ));
+        }
+        Ok(unsafe { value.Anonymous.BooleanVal }.as_bool())
     }
 
     fn set_enabled(&self, enabled: bool) -> Result<()> {
@@ -932,6 +1091,93 @@ impl EventAccess {
 
 #[cfg(feature = "history")]
 struct EventHandle(EVT_HANDLE);
+
+#[cfg(feature = "history")]
+struct NativePageSource {
+    result: EventHandle,
+    bookmark: EventHandle,
+}
+
+#[cfg(feature = "history")]
+impl super::watch::PageSource for NativePageSource {
+    type Handle = EventHandle;
+
+    fn seek(&mut self, _: &super::watch::Cursor) -> Result<()> {
+        unsafe {
+            EvtSeek(
+                self.result.raw(),
+                0,
+                Some(self.bookmark.raw()),
+                Some(0),
+                EvtSeekRelativeToBookmark.0 | EvtSeekStrict.0,
+            )
+        }
+        .map_err(|error| continuation_error("seek history bookmark", error))
+    }
+
+    fn next(&mut self, count: usize) -> Result<Vec<EventHandle>> {
+        next_events(self.result.raw(), count)
+    }
+
+    fn render(&self, handle: &EventHandle) -> Result<HistoryEvent> {
+        from_event_xml(&render_event_xml(handle.raw())?)
+    }
+
+    fn bookmark(&self, handle: &EventHandle) -> Result<String> {
+        unsafe { EvtUpdateBookmark(self.bookmark.raw(), handle.raw()) }
+            .map_err(|error| continuation_error("advance history bookmark", error))?;
+        render_fragment(self.bookmark.raw(), EvtRenderBookmark.0)
+    }
+}
+
+#[cfg(feature = "history")]
+fn continuation_error(operation: &str, error: WindowsError) -> Error {
+    use windows::Win32::Foundation::{
+        ERROR_EVT_QUERY_RESULT_INVALID_POSITION, ERROR_EVT_QUERY_RESULT_STALE, ERROR_NOT_FOUND,
+    };
+    let code = u32::from_ne_bytes(error.code().0.to_ne_bytes());
+    if [
+        ERROR_EVT_QUERY_RESULT_INVALID_POSITION,
+        ERROR_EVT_QUERY_RESULT_STALE,
+        ERROR_NOT_FOUND,
+    ]
+    .iter()
+    .any(|expected| code == 0x8007_0000 | expected.0)
+    {
+        history_gap(error.code().0)
+    } else {
+        event_error(operation, error)
+    }
+}
+
+#[cfg(feature = "history")]
+fn history_gap(code: i32) -> Error {
+    Error::new(
+        ErrorKind::HistoryGap,
+        "history bookmark is no longer available; events may have been lost",
+    )
+    .with_operation("history.resume")
+    .with_native_code(code)
+}
+
+#[cfg(feature = "history")]
+fn next_events(query: EVT_HANDLE, count: usize) -> Result<Vec<EventHandle>> {
+    let mut handles = vec![0_isize; count];
+    let mut returned = 0;
+    let result = unsafe { EvtNext(query, &mut handles, 1000, 0, &raw mut returned) };
+    // Own the entire batch before parsing any one event or returning an error.
+    let handles: Vec<_> = handles
+        .into_iter()
+        .take(returned as usize)
+        .filter(|handle| *handle != 0)
+        .map(|handle| EventHandle(EVT_HANDLE(handle)))
+        .collect();
+    match result {
+        Ok(()) => Ok(handles),
+        Err(error) if is_no_more_items(&error) => Ok(handles),
+        Err(error) => Err(continuation_error("read history page", error)),
+    }
+}
 
 #[cfg(feature = "history")]
 impl EventHandle {
@@ -1003,13 +1249,18 @@ fn open_task_scheduler_metadata(session: Option<EVT_HANDLE>) -> Result<EventHand
 
 #[cfg(feature = "history")]
 fn render_event_xml(event: EVT_HANDLE) -> Result<String> {
+    render_fragment(event, EvtRenderEventXml.0)
+}
+
+#[cfg(feature = "history")]
+fn render_fragment(event: EVT_HANDLE, flags: u32) -> Result<String> {
     let mut bytes_used = 0_u32;
     let mut property_count = 0_u32;
     let sizing = unsafe {
         EvtRender(
             None,
             event,
-            EvtRenderEventXml.0,
+            flags,
             0,
             None,
             &raw mut bytes_used,
@@ -1039,7 +1290,7 @@ fn render_event_xml(event: EVT_HANDLE) -> Result<String> {
         EvtRender(
             None,
             event,
-            EvtRenderEventXml.0,
+            flags,
             bytes_used,
             Some(buffer.as_mut_ptr().cast::<c_void>()),
             &raw mut bytes_used,
@@ -1262,6 +1513,116 @@ fn registration_flags(options: &RegistrationOptions) -> i32 {
         flags |= TASK_DONT_ADD_PRINCIPAL_ACE.0;
     }
     flags
+}
+
+struct LocalMemory(*mut c_void);
+impl Drop for LocalMemory {
+    fn drop(&mut self) {
+        let _remaining = unsafe {
+            windows::Win32::Foundation::LocalFree(Some(windows::Win32::Foundation::HLOCAL(self.0)))
+        };
+    }
+}
+
+fn canonical_sddl(
+    descriptor: &SecurityDescriptor,
+    information: SecurityInformation,
+) -> Result<SecurityDescriptor> {
+    use windows::Win32::Security::{
+        Authorization::{
+            ConvertSecurityDescriptorToStringSecurityDescriptorW,
+            ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        },
+        OBJECT_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+    };
+    let mut raw = PSECURITY_DESCRIPTOR::default();
+    unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            &BSTR::from(descriptor.as_sddl()),
+            1,
+            &raw mut raw,
+            None,
+        )
+    }
+    .map_err(|error| native_error("parse security descriptor", None, error))?;
+    let _descriptor_memory = LocalMemory(raw.0);
+    let mut text = PWSTR::null();
+    unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            raw,
+            1,
+            OBJECT_SECURITY_INFORMATION(information.bits()),
+            &raw mut text,
+            None,
+        )
+    }
+    .map_err(|error| native_error("select security descriptor sections", None, error))?;
+    let _text_memory = LocalMemory(text.0.cast());
+    let text = unsafe { text.to_string() }
+        .map_err(|error| native_error("decode security descriptor", None, error.into()))?;
+    SecurityDescriptor::from_sddl(text)
+        .map_err(|error| Error::new(ErrorKind::InvalidDefinition, error.to_string()))
+}
+
+#[cfg(feature = "reconcile")]
+fn resolve_account(target: Option<&str>, name: &str) -> Result<String> {
+    use windows::Win32::Security::{
+        Authorization::ConvertSidToStringSidW, LookupAccountNameW, PSID, SID_NAME_USE,
+    };
+    if name.starts_with("S-1-") {
+        return Ok(name.into());
+    }
+    let target = target.map(BSTR::from);
+    let system = target
+        .as_ref()
+        .map_or(PCWSTR::null(), |name| PCWSTR(name.as_ptr()));
+    let name = BSTR::from(name);
+    let mut sid_bytes = 0;
+    let mut domain_units = 0;
+    let mut kind = SID_NAME_USE::default();
+    let sizing = unsafe {
+        LookupAccountNameW(
+            system,
+            &name,
+            None,
+            &raw mut sid_bytes,
+            None,
+            &raw mut domain_units,
+            &raw mut kind,
+        )
+    };
+    if sid_bytes == 0 || sid_bytes > 65536 || domain_units > 65536 {
+        return Err(sizing.err().map_or_else(
+            || {
+                Error::new(
+                    ErrorKind::Authentication,
+                    "account resolution returned invalid size",
+                )
+            },
+            |error| native_error("resolve principal", None, error),
+        ));
+    }
+    let mut sid = vec![0_u32; usize::try_from(sid_bytes).expect("SID size").div_ceil(4)];
+    let mut domain = vec![0_u16; usize::try_from(domain_units).expect("domain size")];
+    let sid = PSID(sid.as_mut_ptr().cast());
+    unsafe {
+        LookupAccountNameW(
+            system,
+            &name,
+            Some(sid),
+            &raw mut sid_bytes,
+            Some(PWSTR(domain.as_mut_ptr())),
+            &raw mut domain_units,
+            &raw mut kind,
+        )
+    }
+    .map_err(|error| native_error("resolve principal", None, error))?;
+    let mut text = PWSTR::null();
+    unsafe { ConvertSidToStringSidW(sid, &raw mut text) }
+        .map_err(|error| native_error("encode principal SID", None, error))?;
+    let _text_memory = LocalMemory(text.0.cast());
+    unsafe { text.to_string() }
+        .map_err(|error| native_error("decode principal SID", None, error.into()))
 }
 
 fn string_array_variant(values: &[String]) -> Result<VARIANT> {

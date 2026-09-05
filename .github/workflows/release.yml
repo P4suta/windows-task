@@ -18,7 +18,25 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      revision: ${{ steps.revision.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+      - id: revision
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+  verify:
+    needs: resolve
+    uses: ./.github/workflows/ci.yml
+    with:
+      revision: ${{ needs.resolve.outputs.revision }}
+
   build:
+    needs: [resolve, verify]
     name: Build ${{ matrix.name }}
     runs-on: windows-latest
     strategy:
@@ -32,7 +50,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: ${{ needs.resolve.outputs.revision }}
       - name: Install Rust target
         shell: pwsh
         run: |
@@ -40,8 +58,10 @@ jobs:
           rustup target add --toolchain 1.85.0 ${{ matrix.target }}
       - name: Verify tag matches the workspace version
         shell: pwsh
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          $releaseTag = "${{ inputs.tag || github.ref_name }}"
+          $releaseTag = $env:RELEASE_TAG
           $metadata = cargo +1.85.0 metadata --no-deps --format-version 1 | ConvertFrom-Json
           $version = ($metadata.packages | Where-Object { $_.name -eq "windows-task" }).version
           if ($releaseTag -ne "v$version") {
@@ -61,6 +81,14 @@ jobs:
           New-Item -ItemType Directory -Path dist
           Copy-Item "target/${{ matrix.target }}/release/windows-task.exe" dist/
           Copy-Item LICENSE-APACHE, LICENSE-MIT, NOTICE, README.md dist/
+          @{
+            revision = (git rev-parse HEAD)
+            target = '${{ matrix.target }}'
+            x64_native_suite_required = $true
+            this_architecture_executed = ('${{ matrix.target }}' -eq 'x86_64-pc-windows-msvc')
+            remote_execution_verified = $false
+            verification_run = '${{ github.run_id }}'
+          } | ConvertTo-Json | Set-Content -Encoding utf8 dist/VERIFICATION.json
           $archive = "windows-task-${{ matrix.name }}.zip"
           Compress-Archive -Path dist/* -DestinationPath $archive
           $checksum = (Get-FileHash $archive -Algorithm SHA256).Hash.ToLower()
