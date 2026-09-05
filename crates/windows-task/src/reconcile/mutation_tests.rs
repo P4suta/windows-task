@@ -362,6 +362,15 @@ fn task_backup_credentials_and_security_require_explicit_irreversible_permission
 
 #[test]
 fn conditional_ace_text_does_not_request_unrelated_security_sections() {
+    for (text, expected) in [
+        ("O:SY", SecurityInformation::OWNER),
+        ("G:BA", SecurityInformation::GROUP),
+        ("D:(A;;GR;;;SY)", SecurityInformation::DACL),
+        ("S:(AU;SA;GR;;;WD)", SecurityInformation::SACL),
+    ] {
+        let descriptor = SecurityDescriptor::from_sddl(text).expect("one security section");
+        assert_eq!(security_information_for_sddl(&descriptor), expected);
+    }
     for expression in [
         "S:O:G:",
         "))S:O:G:",
@@ -375,7 +384,21 @@ fn conditional_ace_text_does_not_request_unrelated_security_sections() {
             security_information_for_sddl(&descriptor),
             SecurityInformation::DACL
         );
+        let descriptor =
+            SecurityDescriptor::from_sddl(format!("{}S:(AU;SA;GR;;;WD)", descriptor.as_sddl()))
+                .expect("audit section after conditional text");
+        assert_eq!(
+            security_information_for_sddl(&descriptor),
+            SecurityInformation::DACL | SecurityInformation::SACL
+        );
     }
+    // Input not yet validated by Windows must not request additional sections
+    // merely because malformed ACE content resembles a top-level descriptor.
+    let malformed = SecurityDescriptor::from_sddl("D:(O:G:S:)").expect("unvalidated input");
+    assert_eq!(
+        security_information_for_sddl(&malformed),
+        SecurityInformation::DACL
+    );
 }
 
 #[test]
