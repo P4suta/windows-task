@@ -188,25 +188,33 @@ fn exercise_recovery(
 fn account(username: &str, password: Option<&str>) -> windows_task::Result<()> {
     // The username is generated locally from a UUID. The secret only crosses
     // stdin, never argv, environment, an artifact, or captured subprocess output.
-    let body = if password.is_some() {
-        format!(
-            "New-LocalUser -Name '{username}' -Password (ConvertTo-SecureString ([Console]::In.ReadLine()) -AsPlainText -Force) -PasswordNeverExpires | Out-Null"
-        )
-    } else {
-        format!(
-            "if (Get-LocalUser -Name '{username}' -ErrorAction SilentlyContinue) {{ Remove-LocalUser -Name '{username}' }}"
-        )
-    };
-    account_process(&body, password)
+    account_process(
+        if password.is_some() {
+            "create"
+        } else {
+            "remove"
+        },
+        username,
+        password,
+    )
 }
 
-fn account_process(body: &str, password: Option<&str>) -> windows_task::Result<()> {
+fn account_process(mode: &str, username: &str, password: Option<&str>) -> windows_task::Result<()> {
     let mut child = Command::new("powershell.exe")
         .args([
             "-NoProfile",
             "-NonInteractive",
-            "-Command",
-            &format!("$ErrorActionPreference='Stop'; try {{ {body} }} catch {{ @{{ hresult=$_.Exception.HResult; category=[int]$_.CategoryInfo.Category; error_type=$_.Exception.GetType().FullName }} | ConvertTo-Json -Compress; exit 1 }}"),
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/tests/windows_smoke/account.ps1"
+            ),
+            "-Mode",
+            mode,
+            "-Name",
+            username,
         ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -230,18 +238,11 @@ fn account_process(body: &str, password: Option<&str>) -> windows_task::Result<(
     if input.is_err() || !output.status.success() {
         let mut error = Error::new(ErrorKind::Other, "account fixture operation failed")
             .with_context("exit_code", format!("{:?}", output.status.code()))
-            .with_context(
-                "stage",
-                if password.is_some() {
-                    "create"
-                } else {
-                    "remove"
-                },
-            );
+            .with_context("stage", mode);
         // Parse only the controlled catch block's allowlisted metadata. Never
         // attach raw stdout/stderr or PowerShell exception messages.
         if let Ok(evidence) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-            for field in ["hresult", "category", "error_type"] {
+            for field in ["hresult", "category", "error_type", "native_code", "phase"] {
                 if let Some(value) = evidence.get(field) {
                     error = error.with_context(field, value.to_string());
                 }
@@ -254,12 +255,17 @@ fn account_process(body: &str, password: Option<&str>) -> windows_task::Result<(
 
 #[test]
 fn account_process_error_metadata_never_captures_the_secret() {
-    let error = account_process(
-        "throw 'SENTINEL_EXCEPTION_BODY'",
-        Some("SENTINEL_STDIN_SECRET"),
-    )
-    .expect_err("controlled subprocess failure without account mutation");
+    let error = account_process("probe", "unused", Some("SENTINEL_STDIN_SECRET"))
+        .expect_err("controlled subprocess failure without account mutation");
     assert!(error.context().contains_key("hresult"));
     assert!(error.context().contains_key("error_type"));
-    assert!(!format!("{error:?}").contains("SENTINEL"));
+    assert_eq!(
+        error.context().get("phase").map(String::as_str),
+        Some("\"probe\""),
+        "native bindings must compile before the controlled failure"
+    );
+    assert!(
+        !format!("{error:?}").contains("SENTINEL"),
+        "exception body and stdin secret must be excluded"
+    );
 }

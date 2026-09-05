@@ -64,6 +64,10 @@ were deliberately refused before state changes (`native-failure-retention-refuse
 `native-password-refused.log`). A new disposable-account fixture exercises actual
 password rejection after one committed update, credential-backed compensation,
 valid retry and idempotence; its hosted acceptance result remains separate.
+Hosted run `33970893768` identified a missing LocalAccounts PowerShell command on
+both x64 and ARM64. The fixture now uses OS account APIs and preserves allowlisted
+failure metadata. ARM64 artifacts report architecture `aarch64`; all other native
+fixtures passed, but the job remains failed until password acceptance passes too.
 The notification trace assertion first failed because native progress dispatch
 had no reporter parent span (`native-notification-trace-first.log`). Passing
 the allowlisted operation context with each notification fixes the gap;

@@ -55,7 +55,10 @@ Password-backed native restoration uses a separate `WINDOWS_TASK_ACCOUNT_TESTS=1
 acknowledgement on GitHub-hosted CI. It creates a UUID-named temporary account,
 passes its generated password only through subprocess stdin, and suppresses raw
 subprocess output. Failure evidence retains only exception type, numeric HRESULT
-and category, exit code and stage; a sentinel test checks secret exclusion.
+and category, native status, exit code and stage; a sentinel test checks secret exclusion.
+The packaged fixture script uses `NetUserAdd`/`NetUserDel` directly, so it does not
+depend on optional LocalAccounts cmdlets. Both the Rust entry and script enforce
+the disposable-host gate; the script also restricts names to the generated namespace.
 A wrong credential on the second update must restore the first
 update with its backup credential; valid retry and a zero-diff repeat follow.
 The fixture removes both tasks and the account even after an assertion failure.
