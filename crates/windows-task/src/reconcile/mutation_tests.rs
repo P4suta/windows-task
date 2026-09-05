@@ -2,6 +2,90 @@
 use super::*;
 
 #[test]
+fn registration_preserves_existing_acl_unless_an_explicit_replacement_is_requested() {
+    for replace in [false, true] {
+        let (backend, mut manifest) = fixture(1);
+        let original = SecurityDescriptor::from_sddl("D:(A;;GR;;;SY)").expect("old access");
+        let replacement = SecurityDescriptor::from_sddl("D:(A;;GW;;;SY)").expect("new access");
+        manifest.tasks[0]
+            .definition
+            .registration
+            .security_descriptor = Some(original.clone());
+        apply_fixture(&backend, &manifest);
+        manifest.tasks[0].definition.registration.description = Some("new definition".into());
+        manifest.tasks[0]
+            .definition
+            .registration
+            .security_descriptor = replace.then_some(replacement.clone());
+        apply_fixture(&backend, &manifest);
+        assert_eq!(
+            backend.state.borrow().tasks[&manifest.tasks[0].path]
+                .registration
+                .security_descriptor,
+            Some(if replace { replacement } else { original }),
+            "registration must distinguish preserved and explicitly replaced access"
+        );
+        let report = apply_backend(
+            &backend,
+            &manifest,
+            ApplyOptions::default(),
+            &mut NoCredentials,
+        )
+        .expect("repeat apply");
+        assert!(report.plan.is_empty());
+    }
+}
+
+#[test]
+fn canonical_plan_creates_shallow_folders_first_and_changes_task_acl_before_folder_acl() {
+    let (backend, mut manifest) = fixture(1);
+    let parent = manifest.namespace.join("A").expect("parent");
+    let nested = parent.join("B").expect("child");
+    let sibling = manifest.namespace.join("Z").expect("sibling");
+    for path in [nested.clone(), sibling.clone(), parent.clone()] {
+        manifest.folders.push(crate::manifest::ManagedFolder {
+            path,
+            security_descriptor: Some(acl()),
+        });
+    }
+    manifest.tasks[0]
+        .definition
+        .registration
+        .security_descriptor = Some(acl());
+    let initial = plan(&manifest, &[], false).expect("initial plan");
+    let creates: Vec<_> = initial
+        .changes
+        .iter()
+        .filter_map(|planned| {
+            if let Change::CreateFolder(path) = &planned.change {
+                Some(path.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(
+        creates,
+        [manifest.namespace.clone(), parent, sibling, nested]
+    );
+    apply_fixture(&backend, &manifest);
+    let changed = SecurityDescriptor::from_sddl("D:(A;;GR;;;SY)").expect("changed access");
+    manifest.tasks[0]
+        .definition
+        .registration
+        .security_descriptor = Some(changed.clone());
+    for folder in &mut manifest.folders {
+        folder.security_descriptor = Some(changed.clone());
+    }
+    let state = inspect_backend(&backend, &manifest).expect("current state");
+    let update = plan_state(&manifest, &state, PlanOptions::default()).expect("ACL plan");
+    assert!(
+        matches!(update.changes[0].change, Change::SetTaskSecurity(_)),
+        "task access must be configured before a containing folder can restrict it"
+    );
+}
+
+#[test]
 fn an_empty_failure_report_is_not_a_successful_no_op() {
     let (backend, mut manifest) = fixture(0);
     let report = apply_backend(
@@ -278,7 +362,13 @@ fn task_backup_credentials_and_security_require_explicit_irreversible_permission
 
 #[test]
 fn conditional_ace_text_does_not_request_unrelated_security_sections() {
-    for expression in ["S:O:G:", ")S:O:G:", "日本語 S:"] {
+    for expression in [
+        "S:O:G:",
+        "))S:O:G:",
+        "日本語 S:",
+        r#"\"))S:O:G:"#,
+        r"\\))S:O:G:",
+    ] {
         let text = format!("D:(XA;;GR;;;WD;(@User.label == \"{expression}\"))");
         let descriptor = SecurityDescriptor::from_sddl(text).expect("conditional SDDL");
         assert_eq!(
