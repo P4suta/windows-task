@@ -89,8 +89,24 @@ fn exercise_recovery(
     }
     let mut valid =
         |_: &TaskPath, _: Option<&str>, _: CredentialPurpose| Ok(Password::new(password));
-    apply_with_credentials(blocking, &original, ApplyOptions::default(), &mut valid)
-        .map_err(|failure| failure.cause)?;
+    apply_with_credentials(blocking, &original, ApplyOptions::default(), &mut valid).map_err(
+        |failure| {
+            // This fixture constructs all settings itself. Capture only these
+            // typed settings and the logon mode, never credentials or actions.
+            let observed = blocking.get_task(&paths[0]).and_then(|task| {
+                let definition = task.snapshot.definition()?;
+                Ok(format!(
+                    "settings={:?}; logon_type={:?}",
+                    definition.settings, definition.principal.logon_type
+                ))
+            });
+            failure
+                .cause
+                .with_context("fixture_stage", "initial_registration")
+                .with_context("fixture_observed_settings", format!("{observed:?}"))
+                .with_context("fixture_journal", format!("{:?}", failure.report.journal))
+        },
+    )?;
     let mut desired = original.clone();
     for task in &mut desired.tasks {
         task.definition.registration.description = Some("requested replacement".into());
