@@ -137,7 +137,7 @@ fn isolated_task_round_trip() -> windows_task::Result<()> {
             .ok_or_else(|| Error::new(ErrorKind::Conflict, "native DACL section unavailable"))?;
         let explicit = windows_task::SecurityDescriptor::from_sddl(format!(
             "D:P{}",
-            dacl.trim_start_matches('P').replace(";ID;", ";;")
+            explicit_fixture_aces(dacl.trim_start_matches('P'))?
         ))
         .expect("protected native fixture descriptor");
         blocking.set_task_security(&task, explicit.clone(), information)?;
@@ -164,6 +164,67 @@ fn isolated_task_round_trip() -> windows_task::Result<()> {
     let task_cleanup = blocking.delete_task(&task);
     let folder_cleanup = blocking.delete_folder(&folder);
     cleanup_result(outcome, [task_cleanup, folder_cleanup])
+}
+
+// This fixture uses ordinary native ACEs. Refuse conditional expressions rather
+// than rewriting any of their text as though it were an ACE flags field.
+fn explicit_fixture_aces(dacl: &str) -> windows_task::Result<String> {
+    let mut result = String::new();
+    let mut remaining = dacl;
+    while let Some((prefix, ace)) = remaining.split_once('(') {
+        let (entry, rest) = ace.split_once(')').ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidDefinition,
+                "fixture ACE is missing its end",
+            )
+        })?;
+        if entry.contains(['(', '"']) {
+            return Err(Error::new(
+                ErrorKind::InvalidDefinition,
+                "conditional ACEs are outside this native fixture",
+            ));
+        }
+        let mut fields = entry.splitn(3, ';');
+        let kind = fields.next().expect("split always has a first field");
+        let flags = fields.next().ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidDefinition,
+                "fixture ACE flags are missing",
+            )
+        })?;
+        let rest_fields = fields.next().ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidDefinition,
+                "fixture ACE access fields are missing",
+            )
+        })?;
+        result.push_str(prefix);
+        result.push('(');
+        result.push_str(kind);
+        result.push(';');
+        result.push_str(&flags.replace("ID", ""));
+        result.push(';');
+        result.push_str(rest_fields);
+        result.push(')');
+        remaining = rest;
+    }
+    result.push_str(remaining);
+    Ok(result)
+}
+
+#[test]
+fn protected_fixture_preserves_compound_ace_flags_and_order() {
+    let input = "AI(A;OICIIOID;FA;;;SY)(A;ID;FR;;;BA)(A;CI;FW;;;BU)";
+    assert_eq!(
+        explicit_fixture_aces(input).expect("ordinary native ACEs"),
+        "AI(A;OICIIO;FA;;;SY)(A;;FR;;;BA)(A;CI;FW;;;BU)"
+    );
+    assert_eq!(
+        explicit_fixture_aces("(XA;;FA;;;WD;(@User.x == 1))")
+            .expect_err("conditional expressions must not be rewritten")
+            .kind(),
+        ErrorKind::InvalidDefinition
+    );
 }
 
 fn protected_dacl_matches(

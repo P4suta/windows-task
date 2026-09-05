@@ -6,6 +6,9 @@ use crate::{
 };
 use std::cell::RefCell;
 
+#[path = "mutation_tests.rs"]
+mod mutation_tests;
+
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 struct State {
     tasks: BTreeMap<TaskPath, TaskDefinition>,
@@ -23,6 +26,17 @@ struct Fake {
     calls: RefCell<Vec<&'static str>>,
     faults: RefCell<Vec<Fault>>,
     drift: RefCell<Option<(&'static str, usize, TaskPath)>>,
+    registrations: RefCell<Vec<RegistrationContract>>,
+}
+
+// Store presence, never the fixture credential bytes, in inspectable history.
+#[derive(Debug)]
+struct RegistrationContract {
+    mode: RegistrationMode,
+    suppress_triggers: bool,
+    preserve_acl: bool,
+    has_password: bool,
+    raw: bool,
 }
 
 fn acl() -> SecurityDescriptor {
@@ -32,6 +46,15 @@ fn missing() -> Error {
     Error::new(ErrorKind::NotFound, "fixture object absent")
 }
 impl Fake {
+    fn record_registration(&self, options: &RegistrationOptions, raw: bool) {
+        self.registrations.borrow_mut().push(RegistrationContract {
+            mode: options.mode,
+            suppress_triggers: options.ignore_registration_triggers,
+            preserve_acl: options.dont_add_principal_ace,
+            has_password: options.password.is_some(),
+            raw,
+        });
+    }
     fn invoke<T>(
         &self,
         name: &'static str,
@@ -164,8 +187,9 @@ impl Backend for Fake {
         &self,
         path: &TaskPath,
         mut definition: TaskDefinition,
-        _: RegistrationOptions,
+        options: RegistrationOptions,
     ) -> Result<()> {
+        self.record_registration(&options, false);
         self.invoke("register", |state| {
             definition
                 .registration
@@ -180,8 +204,9 @@ impl Backend for Fake {
         path: &TaskPath,
         raw: RawTaskXml,
         _: LogonType,
-        _: RegistrationOptions,
+        options: RegistrationOptions,
     ) -> Result<()> {
+        self.record_registration(&options, true);
         self.invoke("register_raw", |state| {
             let mut definition = raw.definition()?;
             definition
@@ -419,6 +444,15 @@ fn stop_side_effect_is_not_reported_as_fully_reversible() {
     )
     .expect_err("response lost after stop");
     assert_eq!(failure.report.irreversible_effects.len(), 1);
+    assert_eq!(
+        backend
+            .calls
+            .borrow()
+            .iter()
+            .filter(|call| **call == "stop_all")
+            .count(),
+        1
+    );
     assert!(!failure.report.rollback_complete());
 }
 

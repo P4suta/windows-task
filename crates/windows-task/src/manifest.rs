@@ -164,8 +164,17 @@ impl TaskManifest {
                 .map_err(|error| serialization_error(format!("TOML: {error}"))),
             DocumentFormat::Json => serde_json::to_string_pretty(self)
                 .map_err(|error| serialization_error(format!("JSON: {error}"))),
-            DocumentFormat::Yaml => serde_saphyr::to_string(self)
-                .map_err(|error| serialization_error(format!("YAML: {error}"))),
+            DocumentFormat::Yaml => {
+                // The MSRV-compatible saphyr serializer emits ambiguous plain
+                // scalars (for example `owner_name: value:`). Use the same data
+                // model as JSON, with block containers and JSON-quoted scalars,
+                // a YAML 1.2 subset that never guesses whether text is a token.
+                let value = serde_json::to_value(self)
+                    .map_err(|_| serialization_error("cannot encode YAML manifest values"))?;
+                let mut output = String::new();
+                write_yaml_value(&value, 0, &mut output);
+                Ok(output)
+            }
         }
     }
 
@@ -286,6 +295,38 @@ fn percent_encode(value: &str) -> String {
     encoded
 }
 
+fn write_yaml_value(value: &serde_json::Value, indent: usize, output: &mut String) {
+    match value {
+        serde_json::Value::Object(fields) if !fields.is_empty() => {
+            for (key, value) in fields {
+                let key = serde_json::Value::String(key.clone()).to_string();
+                write_yaml_entry(&format!("{key}:"), value, indent, output);
+            }
+        }
+        serde_json::Value::Array(items) if !items.is_empty() => {
+            for value in items {
+                write_yaml_entry("-", value, indent, output);
+            }
+        }
+        _ => {
+            output.push_str(&value.to_string());
+            output.push('\n');
+        }
+    }
+}
+
+fn write_yaml_entry(prefix: &str, value: &serde_json::Value, indent: usize, output: &mut String) {
+    output.push_str(&" ".repeat(indent));
+    output.push_str(prefix);
+    let container = match value {
+        serde_json::Value::Object(fields) => !fields.is_empty(),
+        serde_json::Value::Array(items) => !items.is_empty(),
+        _ => false,
+    };
+    output.push(if container { '\n' } else { ' ' });
+    write_yaml_value(value, indent + 2, output);
+}
+
 fn serialization_error(message: impl Into<String>) -> Error {
     let message = message.into();
     Error::new(ErrorKind::Serialization, message.clone()).with_validation(ValidationReport {
@@ -310,6 +351,45 @@ mod tests {
 
     use super::{DocumentFormat, TaskManifest};
     use crate::FolderPath;
+
+    #[test]
+    fn yaml_quotes_ambiguous_scalars_and_preserves_nested_manifest_values() {
+        use crate::{
+            manifest::ManagedTask,
+            model::{Action, ExecAction, TaskDefinition},
+        };
+        for value in [
+            "fuz:",
+            "true",
+            "null",
+            "007",
+            "trailing ",
+            " leading",
+            "line\nnext\r\n",
+            "\u{1b}\0\t",
+            "日本語:#[]{}",
+            "a\u{feff}b",
+        ] {
+            let mut manifest =
+                TaskManifest::new(Uuid::nil(), value, "\\Tests".parse().expect("namespace"));
+            let mut definition =
+                TaskDefinition::new(Action::Exec(ExecAction::new("fixture.exe").args([value])));
+            definition.registration.description = Some(value.into());
+            manifest.tasks.push(ManagedTask {
+                path: manifest.namespace.task("Task").expect("path"),
+                definition,
+                credentials: Default::default(),
+            });
+            let output = manifest
+                .to_string(DocumentFormat::Yaml)
+                .expect("serialize YAML");
+            assert_eq!(
+                TaskManifest::from_slice(output.as_bytes(), DocumentFormat::Yaml)
+                    .expect("read emitted YAML"),
+                manifest
+            );
+        }
+    }
 
     #[test]
     fn malformed_documents_never_echo_input_in_serialized_errors() {

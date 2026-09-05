@@ -11,7 +11,8 @@ pub fn exercise(data: &[u8]) {
     for format in [windows_task::manifest::DocumentFormat::Json, windows_task::manifest::DocumentFormat::Toml, windows_task::manifest::DocumentFormat::Yaml] {
         if let Ok(manifest) = windows_task::manifest::TaskManifest::from_slice(data, format) {
             if let Ok(output) = manifest.to_string(format) {
-                windows_task::manifest::TaskManifest::from_slice(output.as_bytes(), format).expect("serialized manifest must parse");
+                let decoded = windows_task::manifest::TaskManifest::from_slice(output.as_bytes(), format).expect("serialized manifest must parse");
+                assert_eq!(decoded, manifest, "manifest serialization must preserve every value");
             }
         }
     }

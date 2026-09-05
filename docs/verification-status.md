@@ -3,7 +3,8 @@
 Recorded on 2026-09-05, Windows x64, Rust 1.85.0. The local runs below preceded the commit;
 each run records the base revision and working-tree status. Paths below are
 relative to `target/verification/`. This is local evidence, not a claim that the
-new GitHub workflows have already executed successfully.
+every GitHub workflow has executed successfully. The PR evidence below records
+the subsequent hosted checks separately.
 
 ## Pull request verification
 
@@ -18,7 +19,45 @@ and adding CLI/verification contracts. It confirmed exact instance correlation;
 the native fixture still incorrectly expected raw exit 7 instead of its possible
 HRESULT encoding, and compared the informational ACL inheritance bit literally.
 Both sets of first-failure artifacts are retained under `target/verification`.
-Further regression and review fixes are in progress; these runs are not passes.
+Run `33956342439` reached 67.59% regions / 70.77% lines and passed the SYSTEM
+execution and apply-idempotence fixtures. The ACL fixture still needed explicit
+conversion of inherited ACEs before changing DACL protection.
+
+On revision `8243c96`, run `33957154658` passed the complete Linux job, including
+package consumers and the unchanged 70% region floor: **70.45% regions and
+73.55% lines**. Its evidence is saved in `github-33957154658-portable/`.
+CodeQL and extended native-resource and Miri jobs also passed. Windows passed
+29 commands, including all native fixtures; its final Markdown tool could not
+load `unicorn-magic`. The pinned npm installation now passes locally, with the
+same installer configured for CI. The initial installation error is retained.
+The commitlint failure on that revision exposed ignored hyphenated configuration
+keys; the corrected underscore keys now enable the documented `ci`/`build`/
+`revert` types, with all PR commits checked locally.
+
+The latest local shared CI run, `4fc709d8-27c4-4dcf-bf2c-3a20919a164b`, passed all
+26 commands. The later compound-ACE fixture has separate passing regression,
+Clippy and native task/folder ACL checks in `pr5-compound-ace-fixed.log`,
+`pr5-ace-clippy-fixed.log` and `pr5-compound-ace-native.log`. Local resource
+measurement `resources-d8ff1be0-1fe2-460b-8337-eda3170b0cee` passed 1,000 cycles;
+`resources-b44b618f-6243-46e0-9208-b650825b60f9` deliberately exceeded its one-second
+deadline and correctly preserved a failed result. These deliberate fixture
+failures are not substitutes for the enclosing test or workflow verdict.
+
+Extended run `33957154685` tested 205 reconciliation mutants: 91 caught,
+91 missed and 23 unviable. The missed cases are retained in
+`github-33957154685-mutations/missed.txt`; additional production-boundary tests
+now cover report completeness, ownership/pruning, observation failures,
+registration credentials/flags and multiple changes to one target. The first
+mutation result remains a failure until a subsequent run is inspected.
+
+The same run found a YAML serialization defect after approximately 8.5 million
+guided executions: a trailing colon was emitted as an ambiguous plain scalar.
+The original crash is saved in `github-33957154685-fuzz/` and checked in as
+`fuzz/seeds/yaml-trailing-colon.bin`. A minimized normal test exercises that
+case plus nested strings, control characters and whitespace; output now uses
+quoted YAML 1.2 scalars. The original fuzz run failed and must not be described
+as a successful 20-minute run. The expanded release DLL fixture also passed
+concurrent progress/completion and a failed-then-retried completion callback.
 
 ## Completed local checks
 
@@ -46,10 +85,11 @@ handles +3.9, private memory +309,248 bytes, threads -1.2. These remained within
 the configured bounds (32 handles, 64 MiB, 8 threads). This is a bounded
 regression check, not proof of zero leaks under every operation or workload.
 
-Coverage currently aggregates library/binary unit tests. Native smoke tests,
-the separate DLL process and CLI contract processes are additional execution
-evidence, not included in that percentage. Linux's existing 70% region floor
-remains configured independently; it has not been measured on this host.
+The original Windows percentage in the table covers unit tests only. Current
+coverage includes normal workspace integration tests and CLI contract processes.
+Ignored mutation tests and the separate DLL process remain independent evidence.
+Linux's 70% region floor remains configured independently and has now passed on
+the hosted Linux runner; Windows measurements must not be substituted for it.
 
 ## Reproduced defects and corrections
 
@@ -101,10 +141,10 @@ cleanup touches test artifacts outside its instrumented build directory.
 The complete seven-phase acceptance criteria are **not yet fully verified**.
 Do not describe this report as certification of every listed failure scenario.
 
-- Run the administrative native execution fixture and full Windows suite on a
-  disposable elevated host. The local account could register per-user tasks but
-  SYSTEM registration failed with access denied. The test now restores the
-  original history-enabled setting and records cleanup failures.
+- Finish the full Windows workflow after the successful hosted SYSTEM execution
+  fixture. The local account can register per-user tasks but SYSTEM registration
+  failed with access denied. The fixture restores the original history-enabled
+  setting and records cleanup failures.
 - Extend native Event Log acceptance tests for actual provider log clearing,
   retention and stale-bookmark errors. The shared production page and delivery
   algorithms now have deterministic paging, parse-failure, handle-release,
@@ -113,9 +153,10 @@ Do not describe this report as certification of every listed failure scenario.
   completion notification failures still need acceptance coverage. Startup
   allocation/initialization failures and constructor panic are now injected
   through private test boundaries; the release fixture covers lifecycle modes.
-- Execute Linux CI, the portable coverage floor, long-running guided fuzzing,
-  Miri and mutation jobs. Workflows are configured; local fixed-seed replay is
-  not a replacement. Direct MSVC libFuzzer linking failed (`fuzz-smoke-first.log`).
+- Rerun guided fuzzing after the YAML fix and inspect remaining missed mutants.
+  Miri passed on the hosted Linux runner. Local fixed-seed replay is not a
+  replacement for guided fuzzing. Direct MSVC libFuzzer linking failed
+  (`fuzz-smoke-first.log`); hosted fuzzing runs on Linux.
 - Verify remote authentication, password-backed restoration and ARM64 execution
   on dedicated hosts. ARM64 compilation passed; ARM64 execution did not run.
 - Expand measured native coverage and executable end-to-end usage scenarios as

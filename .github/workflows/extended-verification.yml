@@ -5,6 +5,10 @@ on:
   workflow_dispatch:
   pull_request:
     paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**/Cargo.toml"
+      - "fixtures/native/**"
       - "fuzz/**"
       - "crates/windows-task/src/**"
       - "scripts/verify-native-resources.ps1"

@@ -28,6 +28,8 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 
 ### Fixed
 
+- YAML output quotes ambiguous strings, including trailing colons, whitespace
+  and control characters found by guided fuzzing, while retaining Rust 1.85.
 - Standard XML entities and valid numeric references no longer fail parsing.
 - Event batches release all handles on early exit; bookmark watchers detect
   lost anchors and apply bounded backpressure.

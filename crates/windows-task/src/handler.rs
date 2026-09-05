@@ -898,6 +898,20 @@ pub mod __native {
             );
         }
 
+        fn assert_fixture_progress(mode: &str, failed: bool, progress: &[i16]) {
+            if mode == "progress" && !failed {
+                assert_eq!(progress, [25, 75, 100]);
+            }
+            if mode == "concurrent-progress" {
+                if failed {
+                    assert!(progress.is_empty(), "failed updates are not acknowledged");
+                } else {
+                    assert_eq!(progress.last(), Some(&100));
+                    assert!(progress.windows(2).all(|pair| pair[0] < pair[1]));
+                }
+            }
+        }
+
         #[test]
         #[ignore = "requires release fixture DLL; cargo xtask test --suite windows"]
         fn release_dll_lifecycle_and_panic_containment() {
@@ -921,6 +935,10 @@ pub mod __native {
             let clsid = GUID::from_u128(0x08c5_0c37_3d58_4c7f_b13f_1b31_9e1b_1301);
             for (mode, fail_update, expected_failure) in [
                 ("progress", false, false),
+                ("concurrent-progress", false, false),
+                ("concurrent-progress", true, true),
+                ("concurrent-complete", false, false),
+                ("concurrent-complete-failure", false, false),
                 ("wait", false, false),
                 ("panic", false, true),
                 ("panic-retained", false, true),
@@ -950,7 +968,10 @@ pub mod __native {
                     completed,
                     progress: Arc::clone(&progress),
                     fail_update,
-                    fail_complete_once: AtomicBool::new(mode == "complete-failure"),
+                    fail_complete_once: AtomicBool::new(matches!(
+                        mode,
+                        "complete-failure" | "concurrent-complete-failure"
+                    )),
                 }
                 .into();
                 let services: IUnknown = status.cast().expect("status services");
@@ -962,14 +983,13 @@ pub mod __native {
                         .ok()
                         .expect("stop status");
                     unsafe { handler.Resume() }.expect("resume after stop");
+                    unsafe { handler.Pause() }.expect("pause after stop");
                 }
                 let result = receiver
                     .recv_timeout(Duration::from_secs(10))
                     .expect("completion even after panic with retained clone");
                 assert_eq!(result.is_err(), expected_failure, "fixture mode {mode}");
-                if mode == "progress" && !fail_update {
-                    assert_eq!(*progress.lock().expect("progress"), [25, 75, 100]);
-                }
+                assert_fixture_progress(mode, fail_update, &progress.lock().expect("progress"));
                 if mode == "wait" {
                     // Reuse the same COM object after Stop. A completion callback
                     // can arrive just before the previous worker releases running.
