@@ -13,7 +13,11 @@ use windows_task::{
 
 const DEADLINE: Duration = Duration::from_secs(10);
 
-fn approved_host(actions: Option<&str>, environment: Option<&str>, ack: Option<&str>) -> bool {
+pub(super) fn approved_host(
+    actions: Option<&str>,
+    environment: Option<&str>,
+    ack: Option<&str>,
+) -> bool {
     actions == Some("true") && environment == Some("github-hosted") && ack == Some("1")
 }
 
@@ -39,6 +43,18 @@ fn clearing_requires_both_a_disposable_host_and_explicit_acknowledgement() {
 #[test]
 #[ignore = "clears the Operational log; explicitly acknowledged GitHub-hosted CI only"]
 fn cleared_native_log_reports_a_gap_and_terminates_the_watcher() -> windows_task::Result<()> {
+    require_disposable_host()?;
+    verify_gap(false)
+}
+
+#[test]
+#[ignore = "overwrites retained Operational events; explicitly acknowledged GitHub-hosted CI only"]
+fn overwritten_native_log_reports_a_gap_and_terminates_the_watcher() -> windows_task::Result<()> {
+    require_disposable_host()?;
+    verify_gap(true)
+}
+
+fn require_disposable_host() -> windows_task::Result<()> {
     if !approved_host(
         std::env::var("GITHUB_ACTIONS").ok().as_deref(),
         std::env::var("RUNNER_ENVIRONMENT").ok().as_deref(),
@@ -51,6 +67,10 @@ fn cleared_native_log_reports_a_gap_and_terminates_the_watcher() -> windows_task
             "Event Log clearing requires GitHub-hosted CI and WINDOWS_TASK_CLEAR_EVENT_LOG=1",
         ));
     }
+    Ok(())
+}
+
+fn verify_gap(rollover: bool) -> windows_task::Result<()> {
     let scheduler = Scheduler::builder().local().connect_blocking()?;
     let blocking = scheduler.blocking();
     let enabled = blocking.history_enabled()?;
@@ -59,7 +79,12 @@ fn cleared_native_log_reports_a_gap_and_terminates_the_watcher() -> windows_task
         .expect("fixture namespace");
     let task = folder.task("bookmark-anchor").expect("fixture path");
     let mut probe = None;
+    let original = rollover.then(log_configuration).transpose()?;
     let outcome = (|| {
+        if rollover {
+            configure_log(1_048_576, 0)?;
+            clear_log()?;
+        }
         blocking.set_history_enabled(true)?;
         blocking.create_folder(&folder, None)?;
         let mut definition = TaskDefinition::new(Action::Exec(ExecAction::new("cmd.exe")));
@@ -86,18 +111,10 @@ fn cleared_native_log_reports_a_gap_and_terminates_the_watcher() -> windows_task
             ));
         }
         eprintln!("fixture anchor record_id={}", first.record_id);
-        let status = Command::new("wevtutil.exe")
-            .args(["cl", OPERATIONAL_CHANNEL])
-            .status()
-            .map_err(|error| {
-                Error::new(
-                    ErrorKind::Other,
-                    format!("cannot start fixture log clear: {error}"),
-                )
-            })?;
-        if !status.success() {
-            return Err(Error::new(ErrorKind::Other, "fixture log clear failed")
-                .with_context("exit_code", format!("{:?}", status.code())));
+        if rollover {
+            overwrite_anchor(&blocking, &task, first.record_id)?;
+        } else {
+            clear_log()?;
         }
         let started = Instant::now();
         loop {
@@ -121,6 +138,7 @@ fn cleared_native_log_reports_a_gap_and_terminates_the_watcher() -> windows_task
             blocking.delete_task(&task),
             blocking.delete_folder(&folder),
             blocking.set_history_enabled(enabled),
+            original.map_or(Ok(()), |(size, mode)| configure_log(size, mode)),
         ],
     );
     let stopped = probe.map_or_else(
@@ -128,6 +146,112 @@ fn cleared_native_log_reports_a_gap_and_terminates_the_watcher() -> windows_task
         |probe| probe.finish(&scheduler),
     );
     cleanup_result(outcome, [stopped])
+}
+
+fn clear_log() -> windows_task::Result<()> {
+    let status = Command::new("wevtutil.exe")
+        .args(["cl", OPERATIONAL_CHANNEL])
+        .status()
+        .map_err(|error| {
+            Error::new(
+                ErrorKind::Other,
+                format!("cannot start fixture log clear: {error}"),
+            )
+        })?;
+    if !status.success() {
+        return Err(Error::new(ErrorKind::Other, "fixture log clear failed")
+            .with_context("exit_code", format!("{:?}", status.code())));
+    }
+    Ok(())
+}
+
+fn log_configuration() -> windows_task::Result<(u64, u32)> {
+    let output = log_script(
+        "Write-Output ($log.MaximumSizeInBytes.ToString() + ' ' + ([int]$log.LogMode).ToString())",
+    )?;
+    let values: Vec<_> = output.split_whitespace().collect();
+    if values.len() != 2 {
+        return Err(Error::new(
+            ErrorKind::Other,
+            "unexpected fixture log configuration",
+        ));
+    }
+    let size = values[0]
+        .parse()
+        .map_err(|_| Error::new(ErrorKind::Other, "invalid fixture log size"))?;
+    let mode = values[1]
+        .parse()
+        .map_err(|_| Error::new(ErrorKind::Other, "invalid fixture log mode"))?;
+    Ok((size, mode))
+}
+
+fn configure_log(size: u64, mode: u32) -> windows_task::Result<()> {
+    log_script(&format!(
+        "$log.MaximumSizeInBytes={size}; $log.LogMode=[System.Diagnostics.Eventing.Reader.EventLogMode]{mode}; $log.SaveChanges()"
+    ))?;
+    Ok(())
+}
+
+fn log_script(body: &str) -> windows_task::Result<String> {
+    // Only fixture-controlled code and parsed numeric configuration enter this command.
+    let script = format!(
+        "$ErrorActionPreference='Stop'; $log=[System.Diagnostics.Eventing.Reader.EventLogConfiguration]::new('{OPERATIONAL_CHANNEL}'); try {{ {body} }} finally {{ $log.Dispose() }}"
+    );
+    let output = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .output()
+        .map_err(|error| {
+            Error::new(
+                ErrorKind::Other,
+                format!("fixture configuration process: {error}"),
+            )
+        })?;
+    if !output.status.success() {
+        return Err(
+            Error::new(ErrorKind::Other, "fixture log configuration failed").with_context(
+                "stderr",
+                String::from_utf8_lossy(&output.stderr).into_owned(),
+            ),
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn overwrite_anchor(
+    blocking: &BlockingScheduler,
+    task: &windows_task::TaskPath,
+    anchor: u64,
+) -> windows_task::Result<()> {
+    let started = Instant::now();
+    // The fixture stops draining its eight-item queue. This fills the public
+    // watcher's bounded queue, holding its bookmark while the provider rolls over.
+    for index in 0..20_000 {
+        blocking.set_enabled(task, index % 2 == 0)?;
+        if index % 256 == 255 {
+            let oldest = blocking.history(HistoryQuery {
+                forward: true,
+                limit: Some(1),
+                ..HistoryQuery::default()
+            })?;
+            if let Some(oldest) = oldest.first() {
+                if oldest.record_id > anchor.saturating_add(1024) {
+                    eprintln!(
+                        "fixture retention anchor={anchor} oldest={} mutations={}",
+                        oldest.record_id,
+                        index + 1
+                    );
+                    return Ok(());
+                }
+            }
+        }
+        if started.elapsed() > Duration::from_secs(180) {
+            break;
+        }
+    }
+    Err(Error::new(
+        ErrorKind::Timeout,
+        "fixture did not overwrite its retained bookmark within the bounded workload",
+    ))
 }
 
 struct Probe {

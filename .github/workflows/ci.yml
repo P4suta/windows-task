@@ -86,6 +86,7 @@ jobs:
         env:
           WINDOWS_TASK_MUTATION_TESTS: "1"
           WINDOWS_TASK_CLEAR_EVENT_LOG: "1"
+          WINDOWS_TASK_ACCOUNT_TESTS: "1"
         run: cargo +1.85.0 xtask ci --suite all
       - name: Verify package consumers on Windows
         run: cargo +1.85.0 xtask package

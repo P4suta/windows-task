@@ -294,9 +294,11 @@ pub mod __native {
             percent: u8,
             message: String,
             reply: mpsc::SyncSender<crate::Result<()>>,
+            trace: crate::observe::Operation,
         },
         Complete {
             reply: mpsc::SyncSender<crate::Result<()>>,
+            trace: crate::observe::Operation,
         },
         HandlerDone(crate::Result<()>),
     }
@@ -320,6 +322,7 @@ pub mod __native {
                     percent,
                     message: message.to_owned(),
                     reply,
+                    trace: crate::observe::Operation::new("handler.notify_progress"),
                 })
                 .map_err(|_| reporter_stopped())?;
             receiver.recv().map_err(|_| reporter_stopped())?
@@ -328,7 +331,10 @@ pub mod __native {
         pub(crate) fn complete(&self) -> crate::Result<()> {
             let (reply, receiver) = mpsc::sync_channel(1);
             self.sender
-                .send(StatusCommand::Complete { reply })
+                .send(StatusCommand::Complete {
+                    reply,
+                    trace: crate::observe::Operation::new("handler.completion_dispatch"),
+                })
                 .map_err(|_| reporter_stopped())?;
             receiver.recv().map_err(|_| reporter_stopped())?
         }
@@ -542,16 +548,18 @@ pub mod __native {
                     percent,
                     message,
                     reply,
+                    trace,
                 } => {
-                    let result =
+                    let result = trace.run(|| {
                         unsafe { status.UpdateStatus(i16::from(percent), &BSTR::from(message)) }
-                            .map_err(|error| status_error("update handler status", error));
+                            .map_err(|error| status_error("update handler status", error))
+                    });
                     if reply.send(result).is_err() {
                         // The caller no longer needs the response.
                     }
                 }
-                StatusCommand::Complete { reply } => {
-                    let result = notify_completed(&status, S_OK);
+                StatusCommand::Complete { reply, trace } => {
+                    let result = trace.run(|| notify_completed(&status, S_OK));
                     if result.is_err() {
                         // Let the final HandlerDone command retry completion. Resetting
                         // before the reply also closes the race with the user thread.
@@ -903,6 +911,173 @@ pub mod __native {
                 notify_terminal_completed(&status, S_OK).is_err(),
                 "persistent notification failure remains unconfirmed"
             );
+        }
+
+        #[implement(ITaskHandlerStatus)]
+        struct UnavailableStatus {
+            attempts: Arc<Mutex<Vec<HRESULT>>>,
+            updates: Arc<AtomicUsize>,
+        }
+
+        impl ITaskHandlerStatus_Impl for UnavailableStatus_Impl {
+            fn UpdateStatus(&self, _: i16, _: &BSTR) -> windows::core::Result<()> {
+                self.updates.fetch_add(1, Ordering::AcqRel);
+                Err(WindowsError::from_hresult(E_FAIL))
+            }
+
+            fn TaskCompleted(&self, code: HRESULT) -> windows::core::Result<()> {
+                self.attempts
+                    .lock()
+                    .expect("completion attempts")
+                    .push(code);
+                Err(WindowsError::from_hresult(E_FAIL))
+            }
+        }
+
+        #[test]
+        fn persistent_notification_failure_with_concurrent_completion_and_retained_reporter() {
+            let _serial = FAILURE_FIXTURE.lock().expect("native failure fixture");
+            #[cfg(feature = "tracing")]
+            let bytes = Arc::new(Mutex::new(Vec::new()));
+            #[cfg(feature = "tracing")]
+            let _subscriber = {
+                let writer = Capture(Arc::clone(&bytes));
+                tracing::subscriber::set_default(
+                    tracing_subscriber::fmt()
+                        .json()
+                        .with_max_level(tracing::Level::TRACE)
+                        .with_writer(move || writer.clone())
+                        .finish(),
+                )
+            };
+            static RETAINED: Mutex<Option<ProgressReporter>> = Mutex::new(None);
+            #[derive(Default)]
+            struct Handler;
+            impl TaskHandler for Handler {
+                fn run(self, context: HandlerContext) -> crate::Result<()> {
+                    let gate = Arc::new(std::sync::Barrier::new(16));
+                    let workers: Vec<_> = (0..16)
+                        .map(|_| {
+                            let gate = Arc::clone(&gate);
+                            let reporter = context.reporter.clone();
+                            let trace =
+                                crate::observe::Operation::new("fixture.concurrent_completion");
+                            thread::spawn(move || {
+                                trace.run(|| {
+                                    gate.wait();
+                                    reporter.complete()
+                                })
+                            })
+                        })
+                        .collect();
+                    for worker in workers {
+                        let error = worker
+                            .join()
+                            .expect("completion thread")
+                            .expect_err("failed notification cannot acknowledge completion");
+                        assert_eq!(error.native_code(), Some(E_FAIL.0));
+                    }
+                    assert_eq!(
+                        context
+                            .reporter
+                            .report_with_message(50, "SENTINEL_NOTIFICATION_SECRET")
+                            .expect_err("failed update")
+                            .native_code(),
+                        Some(E_FAIL.0)
+                    );
+                    assert_eq!(
+                        context.reporter.progress(),
+                        0,
+                        "failed progress is not committed"
+                    );
+                    *RETAINED.lock().expect("retained reporter") = Some(context.reporter);
+                    panic!("fixture panic after persistent notification failure");
+                }
+            }
+            let _apartment = ComApartment::initialize().expect("test apartment");
+            let attempts = Arc::new(Mutex::new(Vec::new()));
+            let updates = Arc::new(AtomicUsize::new(0));
+            let status: ITaskHandlerStatus = UnavailableStatus {
+                attempts: Arc::clone(&attempts),
+                updates: Arc::clone(&updates),
+            }
+            .into();
+            let services: IUnknown = status.cast().expect("status identity");
+            let handler: ITaskHandler = NativeTaskHandler::<Handler>::new().into();
+            unsafe { handler.Start(&services, &BSTR::new()) }.expect("start handler");
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while ACTIVE_WORKERS.load(Ordering::Acquire) != 0 && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(5));
+            }
+            assert_eq!(
+                ACTIVE_WORKERS.load(Ordering::Acquire),
+                0,
+                "panic terminates worker despite retained reporter"
+            );
+            let reporter = RETAINED
+                .lock()
+                .expect("retained reporter")
+                .take()
+                .expect("user reached panic");
+            assert!(
+                !reporter.completed.load(Ordering::Acquire),
+                "terminal notification remains unconfirmed"
+            );
+            assert_eq!(
+                reporter.complete().expect_err("worker stopped").kind(),
+                crate::ErrorKind::WorkerStopped
+            );
+            assert_eq!(
+                reporter.report(100).expect_err("worker stopped").kind(),
+                crate::ErrorKind::WorkerStopped
+            );
+            assert_eq!(reporter.progress(), 0);
+            let codes = attempts.lock().expect("attempts").clone();
+            assert_eq!(
+                codes.len(),
+                18,
+                "16 explicit attempts and two bounded panic notifications"
+            );
+            assert!(codes[..16].iter().all(|code| *code == S_OK));
+            assert_eq!(&codes[16..], &[E_FAIL, E_FAIL]);
+            assert_eq!(updates.load(Ordering::Acquire), 1);
+            #[cfg(feature = "tracing")]
+            {
+                let log = String::from_utf8(bytes.lock().expect("trace buffer").clone())
+                    .expect("UTF8 trace");
+                assert!(
+                    log.lines()
+                        .any(|line| line.contains("handler.notify_progress")
+                            && line.contains("handler.progress")
+                            && line.contains("\"phase\":\"failed\"")),
+                    "native progress failure must carry its calling reporter span: {log}"
+                );
+                assert!(
+                    log.lines()
+                        .any(|line| line.contains("handler.notify_completion")
+                            && line.contains("handler.completion_dispatch")
+                            && line.contains("handler.complete")
+                            && line.contains("\"phase\":\"failed\"")),
+                    "native completion failure must carry its calling reporter span: {log}"
+                );
+                assert!(
+                    !log.contains("SENTINEL"),
+                    "status messages are never trace fields"
+                )
+            };
+            drop((services, status, handler));
+            assert_eq!(
+                Arc::strong_count(&attempts),
+                1,
+                "COM status released on owner worker"
+            );
+            assert_eq!(
+                ACTIVE_REPORTERS.load(Ordering::Acquire),
+                1,
+                "retained reporter still prevents unload"
+            );
+            drop(reporter);
+            assert_eq!(ACTIVE_REPORTERS.load(Ordering::Acquire), 0);
         }
 
         #[test]

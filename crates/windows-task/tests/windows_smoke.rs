@@ -3,6 +3,9 @@
 #[path = "windows_smoke/history_gap.rs"]
 mod history_gap;
 
+#[path = "windows_smoke/password_recovery.rs"]
+mod password_recovery;
+
 use windows_task::{
     Error, ErrorKind, FolderPath,
     client::{ListOptions, RegistrationMode, RegistrationOptions, Scheduler},

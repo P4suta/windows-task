@@ -40,6 +40,35 @@ error; normal native tests verify packet references, counters, no user execution
 on failure and a healthy restart. The optimized DLL fixture and local common CI
 also passed. Its hosted verification is tracked with that diagnostics change.
 
+[PR 7](https://github.com/P4suta/windows-task/pull/7) merged as `686e970`.
+Post-merge CI `33966509415` and CodeQL `33966509422` passed. Extended run
+`33965798135` passed 10,322,046 fuzz executions, 31 Miri tests and 10,000 native
+resource cycles. The mutation job retained the same six classified missed cases.
+
+The next acceptance extension passes actual read-only native missing-bookmark
+and invalid-handle tests, plus the stale/permission/timeout classification matrix
+(`native-failure-history-first.log`). A native handler test combines 16 concurrent
+failed completion notifications, failed progress, panic and a retained reporter:
+it confirms bounded terminal retries, unconfirmed completion, worker termination
+and COM reference release (`native-failure-handler-first.log`). A new destructive
+retention-overwrite fixture is restricted to the existing acknowledged disposable
+CI gate; its hosted result must be checked separately before claiming success.
+Hosted CI `33968946382` subsequently passed both full jobs. In its native
+retention test, 3,072 fixture changes advanced the oldest retained record to 1,280
+past anchor 4; the public watcher terminated with `HistoryGap` and native code
+`-2147023728`. Evidence is in
+`github-33968946382-windows/e2ba84f3-fcda-460f-8541-27002724cb5f/09.stdout.log`.
+The handler combination also passed an optimized test executable
+(`native-failure-release.log`). Local destructive retention and account tests
+were deliberately refused before state changes (`native-failure-retention-refused.log`,
+`native-password-refused.log`). A new disposable-account fixture exercises actual
+password rejection after one committed update, credential-backed compensation,
+valid retry and idempotence; its hosted acceptance result remains separate.
+The notification trace assertion first failed because native progress dispatch
+had no reporter parent span (`native-notification-trace-first.log`). Passing
+the allowlisted operation context with each notification fixes the gap;
+`native-notification-trace-fixed.log` passes and checks status-message redaction.
+
 The first CI run, `33954240164`, passed Linux checks and package consumers but
 measured only 56.52% region coverage against the existing 70% floor. Windows
 exposed a running-instance disappearance race and native ACL normalization.
@@ -203,21 +232,22 @@ cleanup touches test artifacts outside its instrumented build directory.
 The complete seven-phase acceptance criteria are **not yet fully verified**.
 Do not describe this report as certification of every listed failure scenario.
 
-- Extend native Event Log acceptance tests for retention expiry and additional
-  stale-bookmark/provider errors. Actual log clearing passed on the disposable
-  hosted runner. The shared production page and delivery
+- Native retention overwrite and log clearing now pass on disposable CI.
+  Extend evidence for additional provider failures when concrete cases arise.
+  The shared production page and delivery
   algorithms now have deterministic paging, parse-failure, handle-release,
   1,024-event/backpressure/gap tests; OS-provider behavior needs separate evidence.
-- Additional native provider errors and combinations of concurrent
-  completion notification failures still need acceptance coverage. Startup
+- Additional native provider errors still need dedicated acceptance coverage.
+  Persistent concurrent completion failure now has a combined native test. Startup
   allocation/initialization failures, an actual unmarshal error and constructor
   panic now have private tests; the release fixture covers lifecycle modes.
 - Continue mutation analysis as behavior changes; the six remaining cases in
   the completed run are classified above. Guided fuzzing and Miri passed. Local
   fixed-seed replay is not a replacement. Direct MSVC libFuzzer linking failed
   (`fuzz-smoke-first.log`); hosted fuzzing runs on Linux.
-- Verify remote authentication, password-backed restoration and ARM64 execution
-  on dedicated hosts. ARM64 compilation passed; ARM64 execution did not run.
+- Verify password-backed restoration with the new disposable-account fixture.
+  Remote authentication and ARM64 execution need dedicated hosts. ARM64
+  compilation passed; ARM64 execution did not run.
 - Expand measured native coverage and executable end-to-end usage scenarios as
   these environments become available. Keep unexecuted scenarios distinct from
   passed commands and preserve every first-failure artifact.

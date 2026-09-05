@@ -1768,4 +1768,66 @@ mod tests {
             ErrorKind::SchedulerUnavailable
         );
     }
+
+    #[cfg(feature = "history")]
+    #[test]
+    fn nonexistent_native_bookmark_reports_a_gap_without_mutating_the_log() {
+        let cursor = super::super::watch::Cursor {
+            bookmark: format!(
+                "<BookmarkList><Bookmark Channel='{}' RecordId='9223372036854775807' IsCurrent='true'/></BookmarkList>",
+                super::OPERATIONAL_CHANNEL
+            ),
+            record_id: 9_223_372_036_854_775_807,
+            timestamp: std::time::SystemTime::UNIX_EPOCH,
+        };
+        let result = super::EventAccess::Local.page(&super::HistoryQuery::default(), Some(cursor));
+        let error = result
+            .err()
+            .expect("missing bookmark must not restart at the latest page");
+        assert_eq!(error.kind(), ErrorKind::HistoryGap);
+        assert!(
+            error.native_code().is_some(),
+            "retain actual EvtSeek failure"
+        );
+    }
+
+    #[cfg(feature = "history")]
+    #[test]
+    fn invalid_native_event_handle_is_an_error_not_an_empty_page() {
+        let error = super::next_events(super::EVT_HANDLE::default(), 16)
+            .err()
+            .expect("invalid EvtNext handle");
+        assert_eq!(error.kind(), ErrorKind::Com);
+        assert_eq!(
+            error.native_code(),
+            Some(windows::core::HRESULT::from_win32(6).0)
+        );
+    }
+
+    #[cfg(feature = "history")]
+    #[test]
+    fn continuation_classification_distinguishes_gaps_permissions_and_timeouts() {
+        use windows::Win32::Foundation::{
+            ERROR_ACCESS_DENIED, ERROR_EVT_QUERY_RESULT_INVALID_POSITION,
+            ERROR_EVT_QUERY_RESULT_STALE, ERROR_NOT_FOUND, ERROR_TIMEOUT,
+        };
+        for (code, expected) in [
+            (
+                ERROR_EVT_QUERY_RESULT_INVALID_POSITION,
+                ErrorKind::HistoryGap,
+            ),
+            (ERROR_EVT_QUERY_RESULT_STALE, ErrorKind::HistoryGap),
+            (ERROR_NOT_FOUND, ErrorKind::HistoryGap),
+            (ERROR_ACCESS_DENIED, ErrorKind::AccessDenied),
+            (ERROR_TIMEOUT, ErrorKind::Timeout),
+        ] {
+            let native = windows::core::HRESULT::from_win32(code.0);
+            let error = super::continuation_error(
+                "fixture continuation",
+                super::WindowsError::from_hresult(native),
+            );
+            assert_eq!(error.kind(), expected);
+            assert_eq!(error.native_code(), Some(native.0));
+        }
+    }
 }
