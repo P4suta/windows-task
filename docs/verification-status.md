@@ -11,6 +11,35 @@ the subsequent hosted checks separately.
 [PR 5](https://github.com/P4suta/windows-task/pull/5) is the development review.
 No release, publication or version tag has been performed.
 
+PR 5 was merged as `0fe5101`; its final revision `370e5f7` passed full Linux and
+Windows CI `33962353242`, CodeQL and commitlint. Post-merge CI `33963206061` also
+passed. Final coverage was **72.57% regions / 75.28% lines on Linux** and
+**62.72% regions / 67.81% lines on Windows**. Extended run `33962353268` passed
+8,414,639 fuzz executions in 1,201 seconds, 31 minimal-feature Miri tests and
+native resource measurements.
+
+That mutation job remains a recorded failure: 186 caught, 6 missed, 23 unviable.
+Two native wrappers (`inspect`, `plan_live`) were caught by the Windows mutation
+fixture. The other four are equivalent changes: omitting the default rollback
+registration mode, XOR instead of OR for disjoint security bits (two sites), and
+also updating the already-consumed current snapshot in the forward-update loop.
+No exclusion hides those results. A separate native security-section mutation
+run caught all 19 viable mutations, with one compile-invalid mutation.
+
+[PR 6](https://github.com/P4suta/windows-task/pull/6), merged as `67efe0d`, added
+actual provider log-clearing acceptance. CI `33964411517` passed both complete
+jobs: its disposable Windows fixture observed record 1, cleared the Operational
+channel, received terminal `HistoryGap` with native code `-2147023728`, and
+completed cleanup. Local/self-hosted attempts are rejected before connection;
+`pr6-local-clear-refused.log` retains the deliberate local refusal. Other
+retention/provider failure modes remain separate acceptance work.
+
+The subsequent handler diagnosis test reproduced an empty trace after a real
+`E_NOINTERFACE` (`pr7-unmarshal-first.log`). The corrected path records the native
+error; normal native tests verify packet references, counters, no user execution
+on failure and a healthy restart. The optimized DLL fixture and local common CI
+also passed. Its hosted verification is tracked with that diagnostics change.
+
 The first CI run, `33954240164`, passed Linux checks and package consumers but
 measured only 56.52% region coverage against the existing 70% floor. Windows
 exposed a running-instance disappearance race and native ACL normalization.
@@ -174,20 +203,17 @@ cleanup touches test artifacts outside its instrumented build directory.
 The complete seven-phase acceptance criteria are **not yet fully verified**.
 Do not describe this report as certification of every listed failure scenario.
 
-- Verify the final recovery corrections through the full Windows workflow. The
-  previous revision passed, including hosted SYSTEM execution; local SYSTEM
-  registration is denied. The fixture restores the original history-enabled
-  setting and records cleanup failures.
-- Extend native Event Log acceptance tests for actual provider log clearing,
-  retention and stale-bookmark errors. The shared production page and delivery
+- Extend native Event Log acceptance tests for retention expiry and additional
+  stale-bookmark/provider errors. Actual log clearing passed on the disposable
+  hosted runner. The shared production page and delivery
   algorithms now have deterministic paging, parse-failure, handle-release,
   1,024-event/backpressure/gap tests; OS-provider behavior needs separate evidence.
-- Native provider/unmarshal errors and additional combinations of concurrent
+- Additional native provider errors and combinations of concurrent
   completion notification failures still need acceptance coverage. Startup
-  allocation/initialization failures and constructor panic are now injected
-  through private test boundaries; the release fixture covers lifecycle modes.
-- Inspect remaining missed mutants after the latest recovery tests. Guided
-  fuzzing after the YAML fix and Miri passed on the hosted Linux runner. Local
+  allocation/initialization failures, an actual unmarshal error and constructor
+  panic now have private tests; the release fixture covers lifecycle modes.
+- Continue mutation analysis as behavior changes; the six remaining cases in
+  the completed run are classified above. Guided fuzzing and Miri passed. Local
   fixed-seed replay is not a replacement. Direct MSVC libFuzzer linking failed
   (`fuzz-smoke-first.log`); hosted fuzzing runs on Linux.
 - Verify remote authentication, password-backed restoration and ARM64 execution

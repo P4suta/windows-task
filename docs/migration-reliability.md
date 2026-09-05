@@ -66,3 +66,7 @@ completion. Downstream panic=abort builds still abort the process.
 Automatic terminal notification retries once after failure. Both attempts are
 traced; two failures leave completion unconfirmed. If the first response was
 lost after delivery, the receiver may see the same terminal code again.
+An unavailable notification interface is recorded as `handler.unmarshal_status`
+with its native error code. The user handler is not started, references are
+released on the worker, and completion remains unconfirmed. `Start` acknowledges
+packet transfer before unmarshalling, avoiding a caller-side wait on a COM RPC.
