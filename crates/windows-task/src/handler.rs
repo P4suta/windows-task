@@ -1045,19 +1045,30 @@ pub mod __native {
             {
                 let log = String::from_utf8(bytes.lock().expect("trace buffer").clone())
                     .expect("UTF8 trace");
+                let has_failed_ancestry = |required: &[&str]| {
+                    log.lines().any(|line| {
+                        let event: serde_json::Value =
+                            serde_json::from_str(line).expect("JSON trace");
+                        event["fields"]["phase"] == "failed"
+                            && event["spans"].as_array().is_some_and(|spans| {
+                                required.iter().all(|operation| {
+                                    spans
+                                        .iter()
+                                        .any(|span| span["operation"].as_str() == Some(*operation))
+                                })
+                            })
+                    })
+                };
                 assert!(
-                    log.lines()
-                        .any(|line| line.contains("handler.notify_progress")
-                            && line.contains("handler.progress")
-                            && line.contains("\"phase\":\"failed\"")),
+                    has_failed_ancestry(&["handler.notify_progress", "handler.progress"]),
                     "native progress failure must carry its calling reporter span: {log}"
                 );
                 assert!(
-                    log.lines()
-                        .any(|line| line.contains("handler.notify_completion")
-                            && line.contains("handler.completion_dispatch")
-                            && line.contains("handler.complete")
-                            && line.contains("\"phase\":\"failed\"")),
+                    has_failed_ancestry(&[
+                        "handler.notify_completion",
+                        "handler.completion_dispatch",
+                        "handler.complete"
+                    ]),
                     "native completion failure must carry its calling reporter span: {log}"
                 );
                 assert!(

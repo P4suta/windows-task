@@ -197,15 +197,19 @@ fn account(username: &str, password: Option<&str>) -> windows_task::Result<()> {
             "if (Get-LocalUser -Name '{username}' -ErrorAction SilentlyContinue) {{ Remove-LocalUser -Name '{username}' }}"
         )
     };
+    account_process(&body, password)
+}
+
+fn account_process(body: &str, password: Option<&str>) -> windows_task::Result<()> {
     let mut child = Command::new("powershell.exe")
         .args([
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            &format!("$ErrorActionPreference='Stop'; {body}"),
+            &format!("$ErrorActionPreference='Stop'; try {{ {body} }} catch {{ @{{ hresult=$_.Exception.HResult; category=[int]$_.CategoryInfo.Category; error_type=$_.Exception.GetType().FullName }} | ConvertTo-Json -Compress; exit 1 }}"),
         ])
         .stdin(Stdio::piped())
-        .stdout(Stdio::null())
+        .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
         .map_err(|_| Error::new(ErrorKind::Other, "cannot start account fixture process"))?;
@@ -217,17 +221,45 @@ fn account(username: &str, password: Option<&str>) -> windows_task::Result<()> {
         }
         Ok::<_, std::io::Error>(())
     })();
-    let status = child.wait().map_err(|_| {
+    let output = child.wait_with_output().map_err(|_| {
         Error::new(
             ErrorKind::Other,
             "account fixture process status unavailable",
         )
     })?;
-    if input.is_err() || !status.success() {
-        return Err(
-            Error::new(ErrorKind::Other, "account fixture operation failed")
-                .with_context("exit_code", format!("{:?}", status.code())),
-        );
+    if input.is_err() || !output.status.success() {
+        let mut error = Error::new(ErrorKind::Other, "account fixture operation failed")
+            .with_context("exit_code", format!("{:?}", output.status.code()))
+            .with_context(
+                "stage",
+                if password.is_some() {
+                    "create"
+                } else {
+                    "remove"
+                },
+            );
+        // Parse only the controlled catch block's allowlisted metadata. Never
+        // attach raw stdout/stderr or PowerShell exception messages.
+        if let Ok(evidence) = serde_json::from_slice::<serde_json::Value>(&output.stdout) {
+            for field in ["hresult", "category", "error_type"] {
+                if let Some(value) = evidence.get(field) {
+                    error = error.with_context(field, value.to_string());
+                }
+            }
+        }
+        return Err(error);
     }
     Ok(())
+}
+
+#[test]
+fn account_process_error_metadata_never_captures_the_secret() {
+    let error = account_process(
+        "throw 'SENTINEL_EXCEPTION_BODY'",
+        Some("SENTINEL_STDIN_SECRET"),
+    )
+    .expect_err("controlled subprocess failure without account mutation");
+    assert!(error.context().contains_key("hresult"));
+    assert!(error.context().contains_key("error_type"));
+    assert!(!format!("{error:?}").contains("SENTINEL"));
 }

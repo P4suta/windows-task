@@ -99,3 +99,45 @@ jobs:
           path: |
             target/verification/
             !target/verification/**/target/**
+
+  windows-arm64:
+    name: Windows ARM64 native
+    runs-on: windows-11-arm
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.revision || github.sha }}
+          persist-credentials: false
+      - name: Select the native ARM64 MSRV host
+        run: |
+          rustup set default-host aarch64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustup toolchain install 1.85.0 --profile minimal --component clippy --component rustfmt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $compiler = rustc +1.85.0 --version --verbose
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $compiler
+          if ($compiler -notcontains 'host: aarch64-pc-windows-msvc') {
+            throw 'ARM64 execution requires an ARM64 compiler host'
+          }
+          if ($env:CARGO_BUILD_TARGET) { throw 'Unexpected target override on native ARM64' }
+      - uses: Swatinem/rust-cache@v2
+      - name: Execute all suites on ARM64
+        env:
+          WINDOWS_TASK_MUTATION_TESTS: "1"
+          WINDOWS_TASK_CLEAR_EVENT_LOG: "1"
+          WINDOWS_TASK_ACCOUNT_TESTS: "1"
+        run: cargo +1.85.0 xtask test --suite all
+      - name: Execute ARM64 package consumers
+        run: cargo +1.85.0 xtask package
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: verification-windows-arm64
+          path: |
+            target/verification/
+            !target/verification/**/target/**

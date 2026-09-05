@@ -53,8 +53,10 @@ operation. Status message text is excluded from those trace fields.
 
 Password-backed native restoration uses a separate `WINDOWS_TASK_ACCOUNT_TESTS=1`
 acknowledgement on GitHub-hosted CI. It creates a UUID-named temporary account,
-passes its generated password only through subprocess stdin, and suppresses
-subprocess output. A wrong credential on the second update must restore the first
+passes its generated password only through subprocess stdin, and suppresses raw
+subprocess output. Failure evidence retains only exception type, numeric HRESULT
+and category, exit code and stage; a sentinel test checks secret exclusion.
+A wrong credential on the second update must restore the first
 update with its backup credential; valid retry and a zero-diff repeat follow.
 The fixture removes both tasks and the account even after an assertion failure.
 Local and self-hosted execution is refused before account or scheduler changes.
@@ -66,6 +68,11 @@ tests. Keep the first failure even if a later attempt succeeds.
 
 Coverage on Linux measures portable execution. Windows execution and ARM64
 compilation are distinct evidence. An ARM64 build is not an ARM64 runtime test.
+The separate `Windows ARM64 native` job uses the public `windows-11-arm` hosted
+runner and explicitly selects the ARM64 Rust 1.85 host. It executes the common
+test suites and packaged consumers, including the native DLL and destructive
+fixtures, and uploads `verification-windows-arm64` independently. Its actual
+runtime outcome must be checked; x64 cross-compilation is not a substitute.
 Remote RPC, credentials and Event Log access need a dedicated remote host.
 
 Run the fixed input corpus locally with
