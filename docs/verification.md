@@ -15,6 +15,17 @@ whether the regression passed; a recursive search for any failed results.json
 entry is not a CI verdict. Compiler caches are excluded from uploaded evidence,
 while logs, source inputs and actual `.crate` archives are retained.
 
+CI caches Cargo dependency downloads, not workspace build directories or installed
+binaries. Each runner builds and verifies from its own fresh `target` directory.
+An explicit `actions/cache` path list includes only `~/.cargo/registry/index`,
+`~/.cargo/registry/cache` and `~/.cargo/git/db`. The `v2-cargo-downloads` prefix
+prevents fallback to earlier cache formats. Main CI `33976700588` reproduced
+stale test/package paths being restored by the old cache and reported `ENOENT`
+during cache cleanup even though the tests passed. Disabling target caching
+alone still ran that cleanup (`33977518489`); the explicit path cache avoids
+walking or modifying workspace verification state. Actual evidence remains in
+artifacts, and `CARGO_INCREMENTAL=0` retains the previous CI build behavior.
+
 Run coverage after CI has finished. The coverage tool cleans some shared test
 artifacts, so running it concurrently with trybuild can collide with loaded DLLs
 on Windows. Retain that first failure if it occurs and rerun sequentially.
