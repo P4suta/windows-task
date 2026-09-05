@@ -3,11 +3,21 @@ name: extended-verification
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - "fuzz/**"
+      - "crates/windows-task/src/**"
+      - "scripts/verify-native-resources.ps1"
+      - ".github/workflows/extended-verification.yml"
   schedule:
     - cron: "17 3 * * 1"
 
 permissions:
   contents: read
+
+concurrency:
+  group: extended-verification-${{ github.ref }}
+  cancel-in-progress: true
 
 defaults:
   run:
@@ -19,6 +29,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - run: rustup toolchain install 1.85.0 --profile minimal
       - name: Repeated native connection and cleanup measurements
         shell: pwsh
@@ -34,6 +46,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - run: rustup toolchain install nightly --profile minimal
       - run: cargo +nightly install cargo-fuzz --locked
       - run: |
@@ -54,6 +68,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - run: rustup toolchain install nightly --profile minimal --component miri
       - run: cargo +nightly miri test -p windows-task --no-default-features --lib 2>&1 | tee miri.log
       - uses: actions/upload-artifact@v7
@@ -67,6 +83,8 @@ jobs:
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - run: rustup toolchain install 1.85.0 --profile minimal
       - run: cargo +stable install cargo-mutants --locked
       - run: >-
