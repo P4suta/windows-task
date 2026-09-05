@@ -340,6 +340,11 @@ impl Session {
     }
 
     #[cfg(feature = "history")]
+    pub(super) fn run_history(&mut self, query: HistoryQuery) -> Result<Vec<HistoryEvent>> {
+        self.event_access.query_inner(query, true)
+    }
+
+    #[cfg(feature = "history")]
     pub(super) fn history_page(
         &mut self,
         query: HistoryQuery,
@@ -897,7 +902,7 @@ impl EventAccess {
         cursor: Option<super::watch::Cursor>,
     ) -> Result<super::watch::Page> {
         let channel = BSTR::from(OPERATIONAL_CHANNEL);
-        let xpath = BSTR::from("*");
+        let xpath = BSTR::from(super::watch::history_xpath(query.since)?);
         let result = EventHandle(
             unsafe {
                 EvtQuery(
@@ -969,6 +974,10 @@ impl EventAccess {
     }
 
     fn query(&self, query: HistoryQuery) -> Result<Vec<HistoryEvent>> {
+        self.query_inner(query, false)
+    }
+
+    fn query_inner(&self, query: HistoryQuery, exact: bool) -> Result<Vec<HistoryEvent>> {
         const DEFAULT_LIMIT: usize = 256;
         const MAX_RETURNED: usize = 100_000;
         const MAX_SCANNED: usize = 100_000;
@@ -991,21 +1000,18 @@ impl EventAccess {
             EvtQueryReverseDirection.0
         };
         let channel = BSTR::from(OPERATIONAL_CHANNEL);
-        let xpath = BSTR::from("*");
+        let xpath = BSTR::from(super::watch::history_xpath(query.since)?);
         let result_set = EventHandle(
             unsafe { EvtQuery(session, &channel, &xpath, EvtQueryChannelPath.0 | direction) }
                 .map_err(|error| event_error("query Task Scheduler history", error))?,
         );
         let provider = open_task_scheduler_metadata(session).ok();
-        let mut output = Vec::with_capacity(wanted.min(256));
-        let mut scanned = 0_usize;
-        while output.len() < wanted && scanned < MAX_SCANNED {
-            let events = next_events(result_set.raw(), 16.min(MAX_SCANNED - scanned))?;
-            if events.is_empty() {
-                break;
+        let mut pending = std::collections::VecDeque::new();
+        super::wait::scan_history(&query, exact, MAX_SCANNED, || {
+            if pending.is_empty() {
+                pending.extend(next_events(result_set.raw(), 16)?);
             }
-            for event_handle in events {
-                scanned += 1;
+            if let Some(event_handle) = pending.pop_front() {
                 let xml = render_event_xml(event_handle.raw())?;
                 let mut event = from_event_xml(&xml)?;
                 if let Some(metadata) = provider.as_ref() {
@@ -1013,30 +1019,11 @@ impl EventAccess {
                         .ok()
                         .or(event.message);
                 }
-                if query
-                    .task
-                    .as_ref()
-                    .is_some_and(|path| event.task_path.as_ref() != Some(path))
-                    || query
-                        .instance_id
-                        .is_some_and(|instance| event.instance_id != Some(instance))
-                    || query.since.is_some_and(|since| event.timestamp < since)
-                {
-                    continue;
-                }
-                output.push(event);
-                if output.len() == wanted {
-                    break;
-                }
+                Ok(Some(event))
+            } else {
+                Ok(None)
             }
-        }
-        if scanned >= MAX_SCANNED && output.len() < wanted {
-            return Err(Error::new(
-                ErrorKind::QueryLimit,
-                "history query reached its scan limit; narrow the query",
-            ));
-        }
-        Ok(output)
+        })
     }
 
     fn enabled(&self) -> Result<bool> {
@@ -1746,6 +1733,7 @@ fn native_error(operation: &str, target: Option<&str>, error: WindowsError) -> E
 const fn native_error_kind(code: u32) -> ErrorKind {
     match code {
         0x8007_0005 => ErrorKind::AccessDenied,
+        0x8007_05B4 => ErrorKind::Timeout,
         0x8007_0002 | 0x8007_0003 | 0x8004_1309 | 0x8004_130D => ErrorKind::NotFound,
         0x8007_00B7 => ErrorKind::AlreadyExists,
         0x8007_0056 | 0x8007_052E | 0x8004_130F | 0x8004_1310 | 0x8004_1311 | 0x8004_1312

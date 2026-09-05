@@ -11,6 +11,13 @@ pub(crate) struct Operation {
 }
 
 impl Operation {
+    #[cfg_attr(
+        not(feature = "tracing"),
+        expect(
+            clippy::unused_self,
+            reason = "the no-op feature configuration retains the same operation scope interface"
+        )
+    )]
     pub(crate) fn scope<T>(&self, work: impl FnOnce() -> T) -> T {
         #[cfg(feature = "tracing")]
         {

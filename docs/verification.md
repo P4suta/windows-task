@@ -9,6 +9,12 @@ stderr logs, and reproduction instructions. Commands are stored as argument
 arrays so shell quoting cannot change their meaning. No environment dump is
 collected. A missing tool is `not_run`, never passed.
 
+Verification-run unit tests deliberately create failed and unstarted fixture
+commands to test that evidence contract. Their enclosing test result determines
+whether the regression passed; a recursive search for any failed results.json
+entry is not a CI verdict. Compiler caches are excluded from uploaded evidence,
+while logs, source inputs and actual `.crate` archives are retained.
+
 Run coverage after CI has finished. The coverage tool cleans some shared test
 artifacts, so running it concurrently with trybuild can collide with loaded DLLs
 on Windows. Retain that first failure if it occurs and rerun sequentially.
@@ -27,6 +33,12 @@ tests. Keep the first failure even if a later attempt succeeds.
 Coverage on Linux measures portable execution. Windows execution and ARM64
 compilation are distinct evidence. An ARM64 build is not an ARM64 runtime test.
 Remote RPC, credentials and Event Log access need a dedicated remote host.
+
+Run the fixed input corpus locally with
+`cargo run --manifest-path fuzz/Cargo.toml --example seed-replay`.
+The example shares the fuzz oracle but is not a libFuzzer target. Native resource
+checks accept `-TimeoutSeconds` and preserve a failure report when their disposable
+test process exceeds the deadline. This does not change production COM shutdown.
 
 The initial local baseline is recorded in
 `target/verification/baseline/test.log`: 28 library tests passed, but the native

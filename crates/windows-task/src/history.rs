@@ -130,7 +130,9 @@ pub enum FallbackReason {
 pub struct RunOutcome {
     /// Correlated instance.
     pub instance_id: Uuid,
-    /// Native result or process exit code.
+    /// Raw native result or process exit code. Operational history can encode an
+    /// Exec exit status as an HRESULT (for example, 7 as `0x80070007`). The value
+    /// is preserved so handler and launch failures are never silently reclassified.
     pub result_code: i32,
     /// How confidently this result identifies the requested run.
     pub confidence: ResultConfidence,

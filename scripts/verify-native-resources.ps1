@@ -1,4 +1,4 @@
-param([int]$Iterations = 10000)
+param([int]$Iterations = 10000, [ValidateRange(1, 7200)][int]$TimeoutSeconds = 900)
 $ErrorActionPreference = 'Stop'
 if ($Iterations -lt 100 -or $Iterations -gt 100000) { throw 'Iterations must be 100..100000' }
 $runDirectory = Join-Path (Get-Location) ('target/verification/resources-' + [guid]::NewGuid())
@@ -14,8 +14,16 @@ try {
     $env:WINDOWS_TASK_SESSION_ITERATIONS = "$Iterations"
     $process = Start-Process -FilePath $artifact.executable -ArgumentList @('repeated_sessions_confirm_shutdown_and_reject_new_work', '--exact', '--test-threads=1', '--nocapture') -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $runDirectory 'test.stdout.log') -RedirectStandardError (Join-Path $runDirectory 'test.stderr.log')
     $timer = [System.Diagnostics.Stopwatch]::StartNew()
+    $timedOut = $false
     while (!$process.HasExited) {
         $process.Refresh()
+        if ($timer.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+            $timedOut = $true
+            # This is our disposable test process, never a library COM worker.
+            $process.Kill($true)
+            $process.WaitForExit()
+            break
+        }
         if (!$process.HasExited) {
             $samples.Add([pscustomobject]@{ milliseconds = $timer.ElapsedMilliseconds; handles = $process.HandleCount; threads = $process.Threads.Count; private_bytes = $process.PrivateMemorySize64 })
         }
@@ -25,7 +33,10 @@ try {
     $samples | ConvertTo-Json | Set-Content (Join-Path $runDirectory 'samples.json')
     # Ignore loader/COM warm-up and compare equal windows while the process lives.
     $steady = @($samples | Where-Object { $_.milliseconds -ge 2000 })
-    if ($steady.Count -lt 20) { throw "Insufficient steady-state samples: $runDirectory" }
+    if ($timedOut -or $steady.Count -lt 20) {
+        @{ revision = (& git rev-parse HEAD); iterations = $Iterations; timed_out = $timedOut; timeout_seconds = $TimeoutSeconds; elapsed_ms = $timer.ElapsedMilliseconds; exit_code = $process.ExitCode; steady_samples = $steady.Count; outcome = 'failed'; reproduce = "pwsh -File scripts/verify-native-resources.ps1 -Iterations $Iterations -TimeoutSeconds $TimeoutSeconds" } | ConvertTo-Json | Set-Content (Join-Path $runDirectory 'results.json')
+        throw "Native resource verification timed out or collected insufficient samples: $runDirectory"
+    }
     $first = @($steady | Select-Object -First 10)
     $last = @($steady | Select-Object -Last 10)
     $growth = @{}

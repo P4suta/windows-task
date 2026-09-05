@@ -643,6 +643,31 @@ fn source_payload_survives_apply_and_path_alone_never_grants_ownership() {
 }
 
 #[test]
+fn exporting_an_owned_definition_back_into_the_manifest_converges() {
+    let (backend, mut manifest) = fixture(1);
+    manifest.tasks[0].definition.registration.source = Some("original-source".into());
+    apply_fixture(&backend, &manifest);
+    manifest.tasks[0].definition = backend.state.borrow().tasks[&manifest.tasks[0].path].clone();
+    let second = apply_backend(
+        &backend,
+        &manifest,
+        ApplyOptions::default(),
+        &mut NoCredentials,
+    )
+    .expect("exported definition remains owned");
+    assert!(second.plan.is_empty());
+    assert!(
+        manifest.tasks[0]
+            .definition
+            .registration
+            .source
+            .as_ref()
+            .expect("source")
+            .ends_with("\noriginal-source")
+    );
+}
+
+#[test]
 fn missing_credentials_prevents_any_registration() {
     let (backend, mut manifest) = fixture(1);
     manifest.tasks[0].definition.principal.identity =

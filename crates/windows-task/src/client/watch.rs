@@ -1,7 +1,8 @@
 //! Bounded, cancellation-aware delivery shared by the native watcher and tests.
 
+use crate::ErrorKind;
 #[cfg(any(windows, test))]
-use crate::{Error, ErrorKind, history::HistoryQuery};
+use crate::{Error, history::HistoryQuery};
 use crate::{Result, history::HistoryEvent};
 #[cfg(any(windows, test))]
 use std::time::SystemTime;
@@ -21,6 +22,26 @@ pub(super) struct Page {
     pub(super) events: Vec<HistoryEvent>,
     pub(super) cursor: Option<Cursor>,
     pub(super) more: bool,
+}
+
+#[cfg(any(windows, test))]
+pub(super) fn history_xpath(since: Option<SystemTime>) -> Result<String> {
+    since.map_or_else(
+        || Ok("*".into()),
+        |since| {
+            let timestamp = jiff::Timestamp::try_from(since).map_err(|_| {
+                Error::new(
+                    ErrorKind::InvalidDefinition,
+                    "history start time is outside the supported range",
+                )
+            })?;
+            // Only a library-formatted timestamp enters XPath; never task names,
+            // credentials, arbitrary expressions or other caller-supplied strings.
+            Ok(format!(
+                "*[System[TimeCreated[@SystemTime >= '{timestamp}']]]"
+            ))
+        },
+    )
 }
 
 /// Native handles remain owned by the returned batch until every parse or
@@ -100,8 +121,17 @@ pub(super) fn deliver(
         if !matches!(stop.try_recv(), Err(mpsc::TryRecvError::Empty)) {
             return;
         }
-        let page = match fetch(cursor.take()) {
+        let page = match fetch(cursor.clone()) {
             Ok(page) => page,
+            Err(error) if error.kind() == ErrorKind::Timeout => {
+                if !matches!(
+                    stop.recv_timeout(interval),
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                ) {
+                    return;
+                }
+                continue;
+            }
             Err(error) => {
                 send(sender, stop, Err(error));
                 return;
@@ -149,6 +179,64 @@ mod tests {
     use super::*;
     use crate::{Error, ErrorKind, history::HistoryEventKind};
     use std::{cell::Cell, rc::Rc};
+
+    #[test]
+    fn channel_time_filter_does_not_interpolate_caller_strings() {
+        assert_eq!(history_xpath(None).expect("unbounded query"), "*");
+        assert_eq!(
+            history_xpath(Some(SystemTime::UNIX_EPOCH)).expect("timestamp query"),
+            "*[System[TimeCreated[@SystemTime >= '1970-01-01T00:00:00Z']]]"
+        );
+    }
+
+    #[test]
+    fn temporary_timeout_retries_the_same_bookmark_then_delivers() {
+        let (sender, receiver) = mpsc::sync_channel(8);
+        let (_stop, stopped) = mpsc::channel();
+        let mut attempt = 0;
+        deliver(
+            |cursor| {
+                attempt += 1;
+                if attempt == 1 {
+                    return Ok(Page {
+                        events: vec![event(1)],
+                        cursor: Some(Cursor {
+                            bookmark: "anchor".into(),
+                            record_id: 1,
+                            timestamp: SystemTime::UNIX_EPOCH,
+                        }),
+                        more: true,
+                    });
+                }
+                assert_eq!(cursor.expect("retained bookmark").record_id, 1);
+                if attempt == 2 {
+                    Err(Error::new(ErrorKind::Timeout, "temporary native timeout"))
+                } else {
+                    Err(Error::new(ErrorKind::HistoryGap, "gap remains terminal"))
+                }
+            },
+            &sender,
+            &stopped,
+            Duration::from_millis(1),
+        );
+        assert_eq!(attempt, 3);
+        assert_eq!(
+            receiver
+                .try_recv()
+                .expect("first event")
+                .expect("event")
+                .record_id,
+            1
+        );
+        assert_eq!(
+            receiver
+                .try_recv()
+                .expect("terminal error")
+                .expect_err("gap")
+                .kind(),
+            ErrorKind::HistoryGap
+        );
+    }
 
     struct Handle {
         event: HistoryEvent,

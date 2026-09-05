@@ -1327,13 +1327,16 @@ fn managed_task<'a>(manifest: &'a TaskManifest, path: &TaskPath) -> Result<&'a M
 fn owned_definition(manifest: &TaskManifest, task: &ManagedTask) -> TaskDefinition {
     let mut definition = task.definition.clone();
     let marker = manifest.ownership_uri(&task.path);
-    definition.registration.source = Some(
-        definition
-            .registration
-            .source
-            .as_ref()
-            .map_or_else(|| marker.clone(), |source| format!("{marker}\n{source}")),
-    );
+    definition.registration.source = Some(definition.registration.source.as_ref().map_or_else(
+        || marker.clone(),
+        |source| {
+            if source == &marker || source.starts_with(&format!("{marker}\n")) {
+                source.clone()
+            } else {
+                format!("{marker}\n{source}")
+            }
+        },
+    ));
     // Windows rewrites URI to the registered task path. Source is preserved.
     definition.registration.uri = Some(task.path.to_string());
     definition

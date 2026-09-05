@@ -140,14 +140,14 @@ fn isolated_task_round_trip() -> windows_task::Result<()> {
         .expect("protected native fixture descriptor");
         blocking.set_task_security(&task, explicit.clone(), information)?;
         let actual = blocking.task_security(&task, information)?;
-        if actual != explicit {
+        if !protected_dacl_matches(&actual, &explicit) {
             return Err(
                 Error::new(ErrorKind::Conflict, "explicit task ACL did not roundtrip")
                     .with_context("actual", actual.as_sddl()),
             );
         }
         blocking.set_folder_security(&folder, explicit.clone(), information)?;
-        if blocking.folder_security(&folder, information)? != explicit {
+        if !protected_dacl_matches(&blocking.folder_security(&folder, information)?, &explicit) {
             return Err(Error::new(
                 ErrorKind::Conflict,
                 "explicit folder ACL did not roundtrip",
@@ -161,6 +161,18 @@ fn isolated_task_round_trip() -> windows_task::Result<()> {
     let task_cleanup = blocking.delete_task(&task);
     let folder_cleanup = blocking.delete_folder(&folder);
     cleanup_result(outcome, [task_cleanup, folder_cleanup])
+}
+
+fn protected_dacl_matches(
+    actual: &windows_task::SecurityDescriptor,
+    expected: &windows_task::SecurityDescriptor,
+) -> bool {
+    actual == expected
+        || actual
+            .as_sddl()
+            .strip_prefix("D:PAI")
+            .zip(expected.as_sddl().strip_prefix("D:P"))
+            .is_some_and(|(actual, expected)| actual == expected)
 }
 
 fn cleanup_result<const N: usize>(
@@ -305,12 +317,21 @@ fn isolated_execution_returns_exact_exit_code() -> windows_task::Result<()> {
                 ..WaitOptions::default()
             },
         )?;
-        if outcome.confidence != ResultConfidence::Exact || outcome.result_code != 7 {
+        // Operational history can encode an Exec exit status as HRESULT_FROM_WIN32.
+        // Keep that raw native code: decoding every HRESULT would corrupt handler
+        // and launch failures. The fixture accepts only the two encodings of 7.
+        let expected = [7, i32::from_ne_bytes(0x8007_0007_u32.to_ne_bytes())];
+        let last_result = blocking.get_task(&task)?.last_result;
+        if outcome.confidence != ResultConfidence::Exact
+            || !expected.contains(&outcome.result_code)
+            || !expected.contains(&last_result)
+        {
             return Err(Error::new(
                 ErrorKind::Conflict,
-                "execution outcome was not exact exit code 7",
+                "execution outcome did not preserve native exit status 7",
             )
-            .with_context("outcome", format!("{outcome:?}")));
+            .with_context("outcome", format!("{outcome:?}"))
+            .with_context("last_result", last_result.to_string()));
         }
         Ok(())
     })();

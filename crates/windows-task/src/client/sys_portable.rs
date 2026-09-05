@@ -72,6 +72,11 @@ impl Session {
     }
 
     #[cfg(feature = "history")]
+    pub(super) fn run_history(&mut self, _query: HistoryQuery) -> Result<Vec<HistoryEvent>> {
+        Err(unsupported())
+    }
+
+    #[cfg(feature = "history")]
     pub(super) fn history_page(
         &mut self,
         _query: HistoryQuery,

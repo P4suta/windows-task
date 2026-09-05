@@ -126,12 +126,33 @@ impl TaskManifest {
         let text = std::str::from_utf8(bytes)
             .map_err(|error| serialization_error(format!("manifest is not UTF-8: {error}")))?;
         let manifest = match format {
-            DocumentFormat::Toml => toml::from_str(text)
-                .map_err(|error| serialization_error(format!("TOML: {error}")))?,
-            DocumentFormat::Json => serde_json::from_str(text)
-                .map_err(|error| serialization_error(format!("JSON: {error}")))?,
-            DocumentFormat::Yaml => serde_saphyr::from_str(text)
-                .map_err(|error| serialization_error(format!("YAML: {error}")))?,
+            DocumentFormat::Toml => toml::from_str(text).map_err(|error: toml::de::Error| {
+                serialization_error("invalid TOML manifest syntax or field type").with_context(
+                    "byte_offset",
+                    error
+                        .span()
+                        .map_or_else(|| "unknown".into(), |span| span.start.to_string()),
+                )
+            })?,
+            DocumentFormat::Json => {
+                serde_json::from_str(text).map_err(|error: serde_json::Error| {
+                    serialization_error("invalid JSON manifest syntax or field type")
+                        .with_context("line", error.line().to_string())
+                        .with_context("column", error.column().to_string())
+                })?
+            }
+            DocumentFormat::Yaml => {
+                serde_saphyr::from_str(text).map_err(|error: serde_saphyr::Error| {
+                    let mut result =
+                        serialization_error("invalid YAML manifest syntax or field type");
+                    if let Some(location) = error.location() {
+                        result = result
+                            .with_context("line", location.line().to_string())
+                            .with_context("column", location.column().to_string());
+                    }
+                    result
+                })?
+            }
         };
         Ok(manifest)
     }
@@ -289,6 +310,22 @@ mod tests {
 
     use super::{DocumentFormat, TaskManifest};
     use crate::FolderPath;
+
+    #[test]
+    fn malformed_documents_never_echo_input_in_serialized_errors() {
+        for (format, input) in [
+            (DocumentFormat::Toml, "owner = SENTINEL_SECRET"),
+            (DocumentFormat::Json, "\"SENTINEL_SECRET\""),
+            (DocumentFormat::Yaml, "owner: [SENTINEL_SECRET"),
+        ] {
+            let error =
+                TaskManifest::from_slice(input.as_bytes(), format).expect_err("invalid manifest");
+            let serialized = serde_json::to_string(&error).expect("structured error");
+            assert!(!serialized.contains("SENTINEL"));
+            assert!(serialized.contains("manifest_syntax"));
+            assert!(serialized.contains("byte_offset") || serialized.contains("line"));
+        }
+    }
 
     #[test]
     fn empty_manifest_round_trips_all_formats() {

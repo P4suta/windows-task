@@ -20,7 +20,7 @@ test = false
 doc = false
 bench = false
 
-[[bin]]
+[[example]]
 name = "seed-replay"
 path = "src/seed_replay.rs"
 test = false

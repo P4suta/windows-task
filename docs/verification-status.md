@@ -1,9 +1,24 @@
 # Reliability implementation and verification status
 
-Recorded on 2026-09-05, Windows x64, Rust 1.85.0. Source changes are uncommitted;
+Recorded on 2026-09-05, Windows x64, Rust 1.85.0. The local runs below preceded the commit;
 each run records the base revision and working-tree status. Paths below are
 relative to `target/verification/`. This is local evidence, not a claim that the
 new GitHub workflows have already executed successfully.
+
+## Pull request verification
+
+[PR 5](https://github.com/P4suta/windows-task/pull/5) is the development review.
+No release, publication or version tag has been performed.
+
+The first CI run, `33954240164`, passed Linux checks and package consumers but
+measured only 56.52% region coverage against the existing 70% floor. Windows
+exposed a running-instance disappearance race and native ACL normalization.
+The next run, `33955285052`, measured 61.88% after including integration processes
+and adding CLI/verification contracts. It confirmed exact instance correlation;
+the native fixture still incorrectly expected raw exit 7 instead of its possible
+HRESULT encoding, and compared the informational ACL inheritance bit literally.
+Both sets of first-failure artifacts are retained under `target/verification`.
+Further regression and review fixes are in progress; these runs are not passes.
 
 ## Completed local checks
 

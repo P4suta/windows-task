@@ -70,7 +70,10 @@ pub(super) struct Live<'a> {
 }
 impl Observer for Live<'_> {
     fn history(&self, query: HistoryQuery) -> Result<Vec<HistoryEvent>> {
-        self.scheduler.history(query)
+        self.scheduler
+            .0
+            .worker
+            .call("history.run", move |session| session.run_history(query))
     }
     fn running(&self) -> Result<Vec<RunningTask>> {
         self.scheduler.running_tasks(true)
@@ -87,6 +90,63 @@ impl Observer for Live<'_> {
     fn sleep(&self, duration: Duration) {
         thread::sleep(duration);
     }
+}
+
+/// The general query must report a scan ceiling, while an instance wait may
+/// finish once its exact outcome has been established by correlated events.
+#[cfg(any(windows, test))]
+pub(super) fn scan_history(
+    query: &HistoryQuery,
+    exact: bool,
+    maximum: usize,
+    mut next: impl FnMut() -> Result<Option<HistoryEvent>>,
+) -> Result<Vec<HistoryEvent>> {
+    let wanted = query.limit.unwrap_or(256);
+    let handle = if exact {
+        query
+            .task
+            .as_ref()
+            .zip(query.instance_id)
+            .map(|(path, instance_id)| RunHandle {
+                path: path.clone(),
+                instance_id,
+                engine_process_id: None,
+            })
+    } else {
+        None
+    };
+    let mut correlation = Correlation::default();
+    let mut output = Vec::new();
+    for _ in 0..maximum {
+        if output.len() == wanted {
+            return Ok(output);
+        }
+        let Some(event) = next()? else {
+            return Ok(output);
+        };
+        if query
+            .task
+            .as_ref()
+            .is_some_and(|path| event.task_path.as_ref() != Some(path))
+            || query
+                .instance_id
+                .is_some_and(|instance| event.instance_id != Some(instance))
+            || query.since.is_some_and(|since| event.timestamp < since)
+        {
+            continue;
+        }
+        let complete = handle
+            .as_ref()
+            .is_some_and(|handle| correlation.ingest(handle, vec![event.clone()]).is_some());
+        output.push(event);
+        if complete || output.len() == wanted {
+            return Ok(output);
+        }
+    }
+    Err(Error::new(
+        ErrorKind::QueryLimit,
+        "history query reached its scan limit; narrow the query",
+    ))
 }
 
 pub(super) fn observe_run(
@@ -402,5 +462,50 @@ mod tests {
             ),
             Some(7)
         );
+    }
+
+    #[test]
+    fn exact_wait_stops_at_proven_completion_but_general_query_keeps_its_scan_ceiling() {
+        let (observer, handle, _) = fixture();
+        let query = HistoryQuery {
+            task: Some(handle.path.clone()),
+            instance_id: Some(handle.instance_id),
+            ..Default::default()
+        };
+        for exact in [false, true] {
+            let mut reads = 0;
+            let result = scan_history(&query, exact, 100_000, || {
+                reads += 1;
+                Ok(Some(HistoryEvent {
+                    record_id: reads,
+                    event_id: if reads == 1 { 102 } else { 201 },
+                    kind: if reads == 1 {
+                        HistoryEventKind::Completed
+                    } else {
+                        HistoryEventKind::ActionCompleted
+                    },
+                    timestamp: observer.now(),
+                    task_path: Some(handle.path.clone()),
+                    instance_id: Some(if reads <= 2 {
+                        handle.instance_id
+                    } else {
+                        Uuid::from_u128(999)
+                    }),
+                    result_code: (reads > 1).then_some(7),
+                    fields: Default::default(),
+                    message: None,
+                }))
+            });
+            if exact {
+                assert_eq!(result.expect("proven result").len(), 2);
+                assert_eq!(reads, 2);
+            } else {
+                assert_eq!(
+                    result.expect_err("incomplete generic query").kind(),
+                    ErrorKind::QueryLimit
+                );
+                assert_eq!(reads, 100_000);
+            }
+        }
     }
 }

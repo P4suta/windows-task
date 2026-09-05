@@ -453,6 +453,78 @@ mod tests {
     use crate::model::{TaskDateTime, Trigger};
 
     #[test]
+    fn invalid_cron_fields_are_not_silently_clamped_or_approximated() {
+        for expression in [
+            "",
+            "0 0 * *",
+            "0 0 * * * extra",
+            "60 0 * * *",
+            "0 24 * * *",
+            "0 0 0 * *",
+            "0 0 * 13 *",
+            "0 0 * * 8",
+            "*/0 0 * * *",
+            "10-5 0 * * *",
+            "0 0 * nowhere *",
+            "0 0 * * someday",
+            "1,,2 0 * * *",
+            "*/bad 0 * * *",
+            "0 0 * * mon-fri/0",
+        ] {
+            let error = CronSchedule::parse(expression).expect_err("invalid cron rejected");
+            assert!(
+                matches!(error, ScheduleError::Invalid(_)),
+                "expression {expression}"
+            );
+        }
+    }
+
+    #[test]
+    fn calendar_compilation_and_recipe_examples_survive_native_xml_roundtrip() {
+        use crate::model::{Action, ExecAction, TaskDefinition, TaskDuration, Weekday};
+        let first = TaskDateTime::parse("2026-09-05T06:15:00+09:00").expect("fixed anchor");
+        let mut recipes = vec![
+            super::once(first.clone()),
+            super::daily(first.clone()),
+            super::weekly(first.clone(), [Weekday::Monday, Weekday::Friday]),
+            super::at_logon(None),
+            super::at_startup(),
+            super::on_event(
+                "<QueryList><Query><Select Path='System'>*</Select></Query></QueryList>",
+            ),
+            super::every(first.clone(), TaskDuration::from_secs(60)).expect("repeated recipe"),
+        ];
+        super::every(first.clone(), TaskDuration::from_secs(0))
+            .expect_err("zero repetition rejected");
+        for expression in [
+            "0 6 * * *",
+            "0 6 1,15 jan,apr *",
+            "0 6 * jan,apr mon",
+            "0 6 * * 7",
+            "0 6 * * sun",
+            "0 6 * jan-dec *",
+        ] {
+            let schedule = CronSchedule::parse(expression).expect("representable cron");
+            assert_eq!(schedule.as_str(), expression);
+            let triggers = schedule.compile(&first).expect("exact native schedule");
+            assert_eq!(triggers.len(), 1);
+            recipes.extend(triggers);
+        }
+        for trigger in recipes {
+            let mut definition = TaskDefinition::new(Action::Exec(ExecAction::new("fixture.exe")));
+            definition
+                .triggers
+                .push(trigger)
+                .expect("single recipe trigger");
+            let xml = crate::xml::to_string(&definition).expect("valid recipe");
+            assert_eq!(
+                crate::xml::from_bytes(xml.as_bytes()).expect("recipe readback"),
+                definition
+            );
+        }
+    }
+
+    #[test]
     fn compiles_weekday_cron() {
         let cron = CronSchedule::parse("30 8 * * mon-fri").expect("cron");
         let first = TaskDateTime::parse("2026-09-02T00:00:00").expect("anchor");

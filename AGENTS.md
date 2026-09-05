@@ -10,7 +10,9 @@ usage documentation. Exercise the production algorithm through internal fault
 boundaries; do not substitute a separately implemented algorithm in tests.
 
 Use `cargo xtask ci` as the common verification entry point. Keep failed runs,
-seeds, command arguments and logs under `target/verification`. Never count an
+seeds, fixed verification-tool arguments and logs under `target/verification`.
+These commands must contain only controlled fixture paths and non-secret build
+options, never user task arguments or credential values. Never count an
 unexecuted native test as passed or hide an initial failure with a retry.
 
 Library code must not initialize global tracing, COM security or panic hooks.

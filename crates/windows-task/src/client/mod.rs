@@ -945,6 +945,8 @@ impl BlockingScheduler {
     /// Watches new history records by polling the channel on a helper thread.
     /// If `query.since` is omitted, the watch begins at the call time instead
     /// of replaying the entire log.
+    /// Watching always reads forward in bounded pages. `query.forward` and
+    /// `query.limit` apply only to one-shot queries and are ignored here.
     #[cfg(feature = "history")]
     pub fn watch_history(
         &self,
@@ -957,7 +959,7 @@ impl BlockingScheduler {
                 "history watch poll interval must be non-zero",
             ));
         }
-        query.forward = false;
+        query.forward = true;
         if query.since.is_none() {
             query.since = Some(SystemTime::now());
         }

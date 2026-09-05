@@ -137,11 +137,37 @@ impl SecurityDescriptor {
             if value.contains(['\'', '"']) {
                 return value.into();
             }
-            value
-                .replace("D:PAI(", "D:P(")
-                .replace("D:AI(", "D:(")
-                .replace("S:PAI(", "S:P(")
-                .replace("S:AI(", "S:(")
+            let mut output = String::new();
+            let mut remaining = value;
+            let mut depth = 0_usize;
+            while let Some(character) = remaining.chars().next() {
+                if depth == 0 && (remaining.starts_with("D:") || remaining.starts_with("S:")) {
+                    output.push_str(&remaining[..2]);
+                    remaining = &remaining[2..];
+                    loop {
+                        if let Some(rest) = remaining.strip_prefix("AI") {
+                            remaining = rest;
+                        } else if let Some(rest) = remaining.strip_prefix("AR") {
+                            output.push_str("AR");
+                            remaining = rest;
+                        } else if let Some(rest) = remaining.strip_prefix('P') {
+                            output.push('P');
+                            remaining = rest;
+                        } else {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                match character {
+                    '(' => depth += 1,
+                    ')' => depth = depth.saturating_sub(1),
+                    _ => {}
+                }
+                output.push(character);
+                remaining = &remaining[character.len_utf8()..];
+            }
+            output
         }
         key(self.as_sddl()) == key(other.as_sddl())
     }
@@ -438,6 +464,19 @@ pub(crate) fn duplicate_ids(values: impl Iterator<Item = String>) -> BTreeSet<St
 #[cfg(all(test, feature = "client"))]
 mod security_tests {
     use super::SecurityDescriptor;
+    #[test]
+    fn composite_inheritance_flags_preserve_requests_and_protection() {
+        let descriptor = |text| SecurityDescriptor::from_sddl(text).expect("fixture SDDL");
+        for section in ["D", "S"] {
+            for flags in ["AR", "PAR"] {
+                let expected = descriptor(format!("{section}:{flags}(A;;FA;;;SY)"));
+                let observed = descriptor(format!("{section}:{flags}AI(A;;FA;;;SY)"));
+                assert!(expected.access_equivalent(&observed));
+                let unprotected = descriptor(format!("{section}:(A;;FA;;;SY)"));
+                assert!(!expected.access_equivalent(&unprotected));
+            }
+        }
+    }
     #[test]
     fn comparison_preserves_protection_rights_and_ace_order() {
         let descriptor = |text| SecurityDescriptor::from_sddl(text).expect("fixture SDDL");

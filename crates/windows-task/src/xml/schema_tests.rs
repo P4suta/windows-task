@@ -15,6 +15,108 @@ fn round_trip(definition: &TaskDefinition) {
 }
 
 #[test]
+fn invalid_native_fields_fail_instead_of_becoming_defaults() {
+    for field in [
+        "Enabled",
+        "Hidden",
+        "AllowStartOnDemand",
+        "DisallowStartIfOnBatteries",
+        "StopIfGoingOnBatteries",
+        "AllowHardTerminate",
+        "StartWhenAvailable",
+        "WakeToRun",
+        "UseUnifiedSchedulingEngine",
+        "DisallowStartOnRemoteAppSession",
+        "Volatile",
+        "RunOnlyIfIdle",
+        "RunOnlyIfNetworkAvailable",
+        "MultipleInstancesPolicy",
+        "Priority",
+        "ExecutionTimeLimit",
+        "DeleteExpiredTaskAfter",
+    ] {
+        let xml = format!("<Task><Settings><{field}>invalid</{field}></Settings></Task>");
+        let error = from_bytes(xml.as_bytes()).expect_err("malformed setting must be visible");
+        assert_eq!(error.kind(), crate::ErrorKind::Xml, "field {field}");
+    }
+    for field in ["LogonType", "RunLevel", "ProcessTokenSidType"] {
+        let xml = format!(
+            "<Task><Principals><Principal><{field}>invalid</{field}></Principal></Principals></Task>"
+        );
+        from_bytes(xml.as_bytes()).expect_err("unknown principal value must be visible");
+    }
+    for fragment in [
+        "<Actions><Exec /></Actions>",
+        "<Actions><ComHandler><ClassId>invalid</ClassId></ComHandler></Actions>",
+        "<Settings><RestartOnFailure /></Settings>",
+        "<Settings><RestartOnFailure><Interval>PT1M</Interval></RestartOnFailure></Settings>",
+        "<Settings><MaintenanceSettings /></Settings>",
+        "<Settings><RunOnlyIfIdle>true</RunOnlyIfIdle><IdleSettings><Duration>invalid</Duration></IdleSettings></Settings>",
+        "<Settings><RunOnlyIfIdle>true</RunOnlyIfIdle><IdleSettings><StopOnIdleEnd>invalid</StopOnIdleEnd></IdleSettings></Settings>",
+        "<RegistrationInfo><Date>invalid</Date></RegistrationInfo>",
+        "<Triggers><CalendarTrigger /></Triggers>",
+        "<Triggers><CalendarTrigger><ScheduleByDay /></CalendarTrigger></Triggers>",
+        "<Triggers><CalendarTrigger><ScheduleByWeek><WeeksInterval>1</WeeksInterval></ScheduleByWeek></CalendarTrigger></Triggers>",
+        "<Triggers><CalendarTrigger><ScheduleByMonth><DaysOfMonth><Day>invalid</Day></DaysOfMonth></ScheduleByMonth></CalendarTrigger></Triggers>",
+        "<Triggers><SessionStateChangeTrigger><StateChange>invalid</StateChange></SessionStateChangeTrigger></Triggers>",
+        "<Triggers><TimeTrigger><StartBoundary>invalid</StartBoundary></TimeTrigger></Triggers>",
+        "<Triggers><TimeTrigger><EndBoundary>invalid</EndBoundary></TimeTrigger></Triggers>",
+        "<Triggers><TimeTrigger><Repetition /></TimeTrigger></Triggers>",
+        "<Triggers><TimeTrigger><RandomDelay>invalid</RandomDelay></TimeTrigger></Triggers>",
+    ] {
+        let error = from_bytes(format!("<Task>{fragment}</Task>").as_bytes())
+            .expect_err("malformed native structure");
+        assert_eq!(error.kind(), crate::ErrorKind::Xml, "fragment {fragment}");
+    }
+}
+
+#[test]
+fn encoding_and_parser_limits_are_checked_at_the_input_boundary() {
+    use super::{ParseLimits, RawTaskXml};
+    for input in [
+        vec![0xFF],
+        vec![0xFF, 0xFE, 0x00],
+        vec![0xFF, 0xFE, 0x00, 0xD8],
+        vec![0xFE, 0xFF, 0xD8, 0x00],
+    ] {
+        RawTaskXml::new(input).expect_err("invalid byte encoding rejected");
+    }
+    for input in [
+        "",
+        "<Task>",
+        "<Task></Other>",
+        "<Task/><Task/>",
+        "<Task a='1' a='2'/>",
+        "<Task>&undefined;</Task>",
+    ] {
+        RawTaskXml::new(input.as_bytes().to_vec()).expect_err("malformed XML rejected");
+    }
+    let limits = ParseLimits {
+        max_bytes: 7,
+        max_depth: 1,
+        max_nodes: 1,
+    };
+    RawTaskXml::with_limits(b"<Task/>".to_vec(), limits).expect("exact limits accepted");
+    RawTaskXml::with_limits(b"<Task />".to_vec(), limits).expect_err("one byte over limit");
+    RawTaskXml::with_limits(
+        b"<Task><Child/></Task>".to_vec(),
+        ParseLimits {
+            max_bytes: 100,
+            max_depth: 4,
+            max_nodes: 1,
+        },
+    )
+    .expect_err("node limit");
+    let definition = TaskDefinition::new(Action::Exec(ExecAction::new("fixture.exe")));
+    let xml = to_string(&definition).expect("UTF8 document");
+    let mut utf16be = vec![0xFE, 0xFF];
+    for unit in xml.encode_utf16() {
+        utf16be.extend_from_slice(&unit.to_be_bytes());
+    }
+    assert_eq!(from_bytes(&utf16be).expect("UTF16 big endian"), definition);
+}
+
+#[test]
 fn inactive_native_idle_settings_do_not_enable_idle_only_execution() {
     for condition in ["", "<RunOnlyIfIdle>false</RunOnlyIfIdle>"] {
         let input = format!(
