@@ -419,7 +419,11 @@ fn definition_from_node(root: &Node) -> Result<TaskDefinition> {
         .child("Settings")
         .map(parse_settings)
         .transpose()?
-        .unwrap_or_default();
+        .unwrap_or_else(|| TaskSettings {
+            // XML's schema default remains false, independent of new-model defaults.
+            use_unified_scheduling_engine: false,
+            ..TaskSettings::default()
+        });
     let triggers = root
         .child("Triggers")
         .map(parse_triggers)

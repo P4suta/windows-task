@@ -22,3 +22,9 @@ Do not claim rollback or shutdown completed when native state is unconfirmed.
 Native mutation tests run only in explicitly selected suites with isolated
 namespaces. CI uses disposable hosts. Preserve foreign tasks and report cleanup
 failures separately from the original failure.
+
+Monitor free storage during verification. Remove obsolete compiler caches only
+after checking that no build uses them and resolving each deletion target inside
+the project. Preserve verification logs, metadata, reproducers, seeds, package
+archives and consumer source. Record cleaned paths and reclaimed bytes under
+`target/verification`; do not discard failed evidence to make room for retries.

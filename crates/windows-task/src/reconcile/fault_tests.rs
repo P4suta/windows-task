@@ -28,6 +28,7 @@ struct Fake {
     drift: RefCell<Option<(&'static str, usize, TaskPath)>>,
     registrations: RefCell<Vec<RegistrationContract>>,
     folder_security_writes: RefCell<Vec<SecurityInformation>>,
+    registered_engine: Option<bool>,
 }
 
 // Store presence, never the fixture credential bytes, in inspectable history.
@@ -192,6 +193,9 @@ impl Backend for Fake {
     ) -> Result<()> {
         self.record_registration(&options, false);
         self.invoke("register", |state| {
+            if let Some(engine) = self.registered_engine {
+                definition.settings.use_unified_scheduling_engine = engine;
+            }
             definition
                 .registration
                 .security_descriptor
@@ -311,6 +315,47 @@ fn fixture(count: usize) -> (Fake, TaskManifest) {
         });
     }
     (backend, manifest)
+}
+
+#[test]
+fn changed_explicit_engine_is_unconfirmed_not_compensated() {
+    let (mut backend, mut manifest) = fixture(1);
+    backend.registered_engine = Some(true);
+    manifest.tasks[0]
+        .definition
+        .settings
+        .use_unified_scheduling_engine = false;
+    let failure = apply_backend(
+        &backend,
+        &manifest,
+        ApplyOptions::default(),
+        &mut NoCredentials,
+    )
+    .expect_err("native engine differs from the explicit request");
+    assert_eq!(failure.cause.kind(), ErrorKind::Conflict);
+    assert_eq!(
+        failure.cause.context().get("field").map(String::as_str),
+        Some("settings.use_unified_scheduling_engine")
+    );
+    assert_eq!(
+        failure.cause.context().get("expected").map(String::as_str),
+        Some("false")
+    );
+    assert_eq!(
+        failure.cause.context().get("observed").map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(
+        failure.report.unresolved,
+        vec![Change::CreateTask(manifest.tasks[0].path.clone())]
+    );
+    assert!(failure.report.applied.is_empty());
+    assert!(failure.report.rolled_back.is_empty());
+    assert!(
+        backend.state.borrow().tasks[&manifest.tasks[0].path]
+            .settings
+            .use_unified_scheduling_engine
+    );
 }
 
 #[test]

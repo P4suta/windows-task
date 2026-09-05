@@ -3,6 +3,9 @@
 #[path = "windows_smoke/history_gap.rs"]
 mod history_gap;
 
+#[path = "windows_smoke/password_recovery.rs"]
+mod password_recovery;
+
 use windows_task::{
     Error, ErrorKind, FolderPath,
     client::{ListOptions, RegistrationMode, RegistrationOptions, Scheduler},
@@ -295,7 +298,6 @@ fn isolated_apply_has_no_second_diff() -> windows_task::Result<()> {
         let mut definition = TaskDefinition::new(Action::Exec(ExecAction::new("fixture.exe")));
         definition.registration.source = Some("fixture-origin".into());
         definition.settings.enabled = false;
-        definition.settings.use_unified_scheduling_engine = true;
         definition.principal.identity = PrincipalIdentity::User(user);
         definition.principal.logon_type = LogonType::InteractiveToken;
         manifest.tasks.push(ManagedTask {

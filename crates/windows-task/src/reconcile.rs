@@ -884,12 +884,10 @@ fn apply_backend(
                 });
             }
             observed => {
-                let error = observed.err().unwrap_or_else(|| {
-                    Error::new(
-                        ErrorKind::Conflict,
-                        "post-mutation state cannot safely be attributed to this apply",
-                    )
-                });
+                let error = match observed {
+                    Err(error) => error,
+                    Ok(after) => recovery::verification_conflict(manifest, change, &after),
+                };
                 record(
                     &mut report,
                     change,

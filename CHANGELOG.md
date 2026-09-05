@@ -17,6 +17,9 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 
 ### Changed
 
+- New task settings enable the unified scheduling engine by default. XML input
+  retains the schema's false default; explicit false requests remain significant.
+  Schema 1.2 definitions must explicitly disable the engine.
 - Run waits require exact instance correlation by default. Polling estimates
   require an explicit option and include their reason.
 - Session/watcher destruction no longer joins an unbounded RPC; explicit
