@@ -15,6 +15,14 @@ whether the regression passed; a recursive search for any failed results.json
 entry is not a CI verdict. Compiler caches are excluded from uploaded evidence,
 while logs, source inputs and actual `.crate` archives are retained.
 
+CI caches Cargo dependency downloads, not workspace build directories or installed
+binaries. Each runner builds and verifies from its own fresh `target` directory.
+The `v1-cargo-downloads` prefix prevents fallback to earlier caches that included
+old verification runs. Main CI `33976700588` reproduced stale test/package paths
+being restored by the old cache and reported `ENOENT` during cache cleanup even
+though the tests passed. This cache boundary keeps those diagnostics and old
+verification state out of subsequent runs; actual evidence remains in artifacts.
+
 Run coverage after CI has finished. The coverage tool cleans some shared test
 artifacts, so running it concurrently with trybuild can collide with loaded DLLs
 on Windows. Retain that first failure if it occurs and rerun sequentially.
