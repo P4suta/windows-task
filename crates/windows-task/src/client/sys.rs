@@ -695,8 +695,10 @@ impl Session {
         information: SecurityInformation,
     ) -> Result<()> {
         let descriptor = canonical_sddl(&descriptor, information)?;
-        let current = self.task_security(path.clone(), information)?;
-        if canonical_sddl(&current, information)?.access_equivalent(&descriptor) {
+        let current = self
+            .task_security(path.clone(), information)
+            .and_then(|current| canonical_sddl(&current, information));
+        if !super::security_write_required(current, &descriptor)? {
             return Ok(());
         }
         let task = self.registered_task(&path)?;
@@ -716,8 +718,10 @@ impl Session {
         information: SecurityInformation,
     ) -> Result<()> {
         let descriptor = canonical_sddl(&descriptor, information)?;
-        let current = self.folder_security(path.clone(), information)?;
-        if canonical_sddl(&current, information)?.access_equivalent(&descriptor) {
+        let current = self
+            .folder_security(path.clone(), information)
+            .and_then(|current| canonical_sddl(&current, information));
+        if !super::security_write_required(current, &descriptor)? {
             return Ok(());
         }
         let folder = self.folder(&path)?;

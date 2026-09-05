@@ -128,14 +128,16 @@ fn isolated_task_round_trip() -> windows_task::Result<()> {
         }
         // Start from native canonical trustee names (the local administrator
         // may be returned as LA rather than its numeric SID). Change protection
-        // while retaining the exact ACE order and access rights.
+        // while retaining the exact ACE order and access rights. Convert the
+        // inherited default ACEs to explicit ACEs when protecting this DACL;
+        // Windows removes ID from those entries as part of that operation.
         let dacl = task_acl
             .as_sddl()
             .strip_prefix("D:")
             .ok_or_else(|| Error::new(ErrorKind::Conflict, "native DACL section unavailable"))?;
         let explicit = windows_task::SecurityDescriptor::from_sddl(format!(
             "D:P{}",
-            dacl.trim_start_matches('P')
+            dacl.trim_start_matches('P').replace(";ID;", ";;")
         ))
         .expect("protected native fixture descriptor");
         blocking.set_task_security(&task, explicit.clone(), information)?;
@@ -143,7 +145,8 @@ fn isolated_task_round_trip() -> windows_task::Result<()> {
         if !protected_dacl_matches(&actual, &explicit) {
             return Err(
                 Error::new(ErrorKind::Conflict, "explicit task ACL did not roundtrip")
-                    .with_context("actual", actual.as_sddl()),
+                    .with_context("actual", actual.as_sddl())
+                    .with_context("expected", explicit.as_sddl()),
             );
         }
         blocking.set_folder_security(&folder, explicit.clone(), information)?;

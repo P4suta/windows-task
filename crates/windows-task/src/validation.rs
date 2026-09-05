@@ -484,6 +484,60 @@ mod tests {
     use crate::model::{Action, ExecAction, LogonType, PrincipalIdentity, TaskDefinition};
 
     #[test]
+    fn invalid_definitions_report_all_actionable_field_locations() {
+        let xml = br"<Task><Principals><Principal id=''/></Principals><Settings><Priority>11</Priority></Settings><Actions><Exec id='duplicate'><Command/></Exec><Exec id='duplicate'><Command>fixture.exe</Command></Exec></Actions></Task>";
+        let definition = crate::xml::from_bytes(xml).expect("syntactically valid definition");
+        let report = definition.validate();
+        assert!(!report.is_valid());
+        for path in [
+            "principal.id",
+            "settings.priority",
+            "actions",
+            "actions[0].command",
+        ] {
+            let diagnostic = report
+                .errors()
+                .find(|diagnostic| diagnostic.path == path)
+                .expect("specific field diagnostic");
+            assert!(!diagnostic.message.is_empty());
+            assert!(
+                diagnostic
+                    .remediation
+                    .as_ref()
+                    .is_some_and(|text| !text.is_empty())
+            );
+        }
+        let error =
+            crate::xml::to_string(&definition).expect_err("invalid registration cannot serialize");
+        assert_eq!(error.diagnostics(), report.diagnostics.as_slice());
+    }
+
+    #[test]
+    fn incomplete_triggers_and_repetition_are_diagnosed_at_their_index() {
+        for trigger in [
+            "<CalendarTrigger><ScheduleByDay><DaysInterval>0</DaysInterval></ScheduleByDay></CalendarTrigger>",
+            "<CalendarTrigger><ScheduleByWeek><WeeksInterval>0</WeeksInterval><DaysOfWeek/></ScheduleByWeek></CalendarTrigger>",
+            "<CalendarTrigger><ScheduleByMonth><DaysOfMonth><Day>0</Day></DaysOfMonth><Months><January/></Months></ScheduleByMonth></CalendarTrigger>",
+            "<CalendarTrigger><ScheduleByMonthDayOfWeek><Weeks/><DaysOfWeek><Monday/></DaysOfWeek><Months><January/></Months></ScheduleByMonthDayOfWeek></CalendarTrigger>",
+            "<EventTrigger><Subscription/></EventTrigger>",
+            "<TimeTrigger><Repetition><Interval>PT0S</Interval></Repetition></TimeTrigger>",
+        ] {
+            let xml = format!(
+                "<Task><Triggers>{trigger}</Triggers><Actions><Exec><Command>fixture.exe</Command></Exec></Actions></Task>"
+            );
+            let definition =
+                crate::xml::from_bytes(xml.as_bytes()).expect("parse invalid semantic fixture");
+            let report = definition.validate();
+            assert!(!report.is_valid(), "trigger {trigger}");
+            assert!(
+                report
+                    .errors()
+                    .any(|diagnostic| diagnostic.path.starts_with("triggers[0]"))
+            );
+        }
+    }
+
+    #[test]
     fn reports_missing_action() {
         assert!(!TaskDefinition::default().validate().is_valid());
     }

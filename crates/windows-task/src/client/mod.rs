@@ -668,6 +668,49 @@ fn collect_running_snapshots<T>(items: impl Iterator<Item = Result<T>>) -> Resul
         .collect()
 }
 
+#[cfg(any(windows, test))]
+fn security_write_required(
+    current: Result<SecurityDescriptor>,
+    desired: &SecurityDescriptor,
+) -> Result<bool> {
+    match current {
+        Ok(current) => Ok(!current.access_equivalent(desired)),
+        Err(error) if error.kind() == ErrorKind::AccessDenied => {
+            // WRITE_DAC does not imply READ_CONTROL. The direct setter remains
+            // usable without read permission; reconcile separately requires its
+            // ownership/precondition/backup reads before calling any setter.
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                phase = "security_read_unavailable",
+                error_kind = "access_denied"
+            );
+            Ok(true)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[test]
+fn acl_write_permission_does_not_require_read_permission() {
+    let desired = SecurityDescriptor::from_sddl("D:P(A;;FA;;;SY)").expect("desired DACL");
+    assert!(!security_write_required(Ok(desired.clone()), &desired).expect("equal descriptor"));
+    let changed = SecurityDescriptor::from_sddl("D:P(A;;FR;;;SY)").expect("different rights");
+    assert!(security_write_required(Ok(changed), &desired).expect("different descriptor"));
+    assert!(
+        security_write_required(
+            Err(Error::new(ErrorKind::AccessDenied, "READ_CONTROL denied")),
+            &desired
+        )
+        .expect("WRITE_DAC may still be available")
+    );
+    let error = security_write_required(
+        Err(Error::new(ErrorKind::Com, "transport failed")),
+        &desired,
+    )
+    .expect_err("transport failure stays visible");
+    assert_eq!(error.kind(), ErrorKind::Com);
+}
+
 #[test]
 fn running_snapshot_disappearance_does_not_hide_other_failures() {
     let gone = Error::new(ErrorKind::Com, "instance ended")

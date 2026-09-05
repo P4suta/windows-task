@@ -356,6 +356,80 @@ mod tests {
     use super::{TaskDateTime, TaskDuration, TimeBasis};
 
     #[test]
+    fn fixed_durations_reject_calendar_units_overflow_and_ambiguous_fractions() {
+        for input in [
+            "",
+            "P",
+            "1S",
+            "-PT1S",
+            "P1Y",
+            "P1M",
+            "P1W",
+            "P-1D",
+            "P1.5D",
+            "PT1HT1M",
+            "PT1H1H",
+            "PT1.2H",
+            "PT1.2M",
+            "PT1M2",
+            "PT.S",
+            "PT1.1234567890S",
+            "PT1.2.3S",
+            "PT1Q",
+            "P18446744073709551615D",
+            "PT18446744073709551615H",
+            "PT18446744073709551616S",
+        ] {
+            TaskDuration::parse(input).expect_err("unsupported fixed duration");
+        }
+        for duration in [
+            std::time::Duration::ZERO,
+            std::time::Duration::from_nanos(1),
+            std::time::Duration::new(3661, 123_400_000),
+            std::time::Duration::from_secs(u64::MAX),
+        ] {
+            let task = TaskDuration::from_std(duration);
+            assert_eq!(
+                TaskDuration::parse(&task.to_string())
+                    .expect("canonical duration")
+                    .as_std(),
+                duration
+            );
+            assert_eq!(
+                TaskDuration::try_from(String::from(task)).expect("owned string conversion"),
+                task
+            );
+        }
+    }
+
+    #[test]
+    fn timestamp_calendar_and_offset_boundaries_remain_distinct() {
+        for input in [
+            "",
+            "2026-02-29T00:00:00",
+            "2026-04-31T00:00:00",
+            "2026-09-05T25:00:00",
+            "2026-09-05T00:00:00+15:00",
+            "2026-09-05T00:00:00-14:01",
+            "2026-09-05T00:00:00+09:60",
+            "2026-09-05T00:00:00+9:00",
+            "2026-09-05T00:00:00+09",
+        ] {
+            TaskDateTime::parse(input).expect_err("invalid calendar or offset");
+        }
+        for input in [
+            "2024-02-29T00:00:00",
+            "2026-09-05T00:00:00+14:00",
+            "2026-09-05T00:00:00-14:00",
+            "1969-12-31T23:59:59.5Z",
+        ] {
+            let timestamp = TaskDateTime::try_from(input.to_owned()).expect("boundary timestamp");
+            assert_eq!(timestamp.to_string(), input);
+            assert_eq!(String::from(timestamp), input);
+        }
+    }
+
+    #[test]
     fn separates_wall_clock_and_offset_boundaries() {
         let local = TaskDateTime::parse("2026-09-02T08:30:00").expect("local boundary");
         let fixed = TaskDateTime::parse("2026-09-02T08:30:00+09:00").expect("fixed boundary");
