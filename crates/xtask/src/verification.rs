@@ -202,9 +202,15 @@ impl Run {
                     "windows_smoke",
                     "--",
                     "--ignored",
+                    "--test-threads=1",
+                    "--show-output",
                 ],
                 &[
                     ("WINDOWS_TASK_MUTATION_TESTS", "1"),
+                    (
+                        "WINDOWS_TASK_CLEAR_EVENT_LOG",
+                        &std::env::var("WINDOWS_TASK_CLEAR_EVENT_LOG").unwrap_or_default(),
+                    ),
                     (
                         "WINDOWS_TASK_EXECUTION_FIXTURE",
                         &std::env::current_dir()?

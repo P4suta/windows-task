@@ -1,5 +1,8 @@
 #![cfg(windows)]
 
+#[path = "windows_smoke/history_gap.rs"]
+mod history_gap;
+
 use windows_task::{
     Error, ErrorKind, FolderPath,
     client::{ListOptions, RegistrationMode, RegistrationOptions, Scheduler},
