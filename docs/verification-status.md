@@ -83,6 +83,17 @@ the revision/working state at collection, before the later ACL corrections.
 
 ## Completed local checks
 
+Revision `ea917be` passed both full CI jobs in run `33960795777`. Final audit
+then reproduced two additional boundaries: an empty preflight failure report
+was classified as a successful no-op, and automatic handler completion did not
+retry its failed terminal callback. Their first failures are retained in
+`pr5-empty-report-first.log` and `pr5-automatic-completion-first.log`. Explicit
+apply status and bounded terminal notification now pass 34 reconciliation
+tests, a normal native callback regression and the release DLL lifecycle test
+(`pr5-terminal-dll-test.log`). The DLL test includes automatic notification
+failure; persistent callback failure remains an error in the normal test.
+The final source revision still requires its own full hosted checks.
+
 | Check | Evidence | Result |
 | --- | --- | --- |
 | Shared CI entry point | `3395cb41-4309-4ed5-a0c7-f8c7db2839ef/results.json` | All 26 commands passed: formatting, Clippy, tests, feature configurations, docs, x64/ARM64 compilation, source rules and dependency/tool checks |

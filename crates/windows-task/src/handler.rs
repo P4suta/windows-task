@@ -533,7 +533,7 @@ pub mod __native {
         });
         drop(sender);
         let Ok(user) = user else {
-            drop(notify_completed(&status, E_FAIL));
+            drop(notify_terminal_completed(&status, E_FAIL));
             return;
         };
         let mut received_handler_done = false;
@@ -572,7 +572,7 @@ pub mod __native {
                                 .filter(|code| *code < 0)
                                 .map_or(E_FAIL, HRESULT),
                         };
-                        if notify_completed(&status, code).is_err() {
+                        if notify_terminal_completed(&status, code).is_err() {
                             completed.store(false, Ordering::Release);
                         }
                     }
@@ -583,10 +583,18 @@ pub mod __native {
         let joined = user.join();
         if (!received_handler_done || joined.is_err())
             && !completed.swap(true, Ordering::AcqRel)
-            && notify_completed(&status, E_FAIL).is_err()
+            && notify_terminal_completed(&status, E_FAIL).is_err()
         {
             completed.store(false, Ordering::Release);
         }
+    }
+
+    fn notify_terminal_completed(status: &ITaskHandlerStatus, code: HRESULT) -> crate::Result<()> {
+        // There is no user caller left to retry an automatic completion. Keep
+        // both attempts in the trace and leave completion unconfirmed if both
+        // fail. A lost response may cause redelivery of the same terminal code.
+        crate::observe::Operation::new("handler.terminal_completion")
+            .run(|| notify_completed(status, code).or_else(|_| notify_completed(status, code)))
     }
 
     fn notify_completed(status: &ITaskHandlerStatus, code: HRESULT) -> crate::Result<()> {
@@ -794,6 +802,27 @@ pub mod __native {
         }
 
         #[test]
+        fn automatic_completion_retries_a_failed_notification() {
+            let _apartment = ComApartment::initialize().expect("test apartment");
+            let (completed, receiver) = mpsc::channel();
+            let status: ITaskHandlerStatus = Status {
+                completed,
+                progress: Arc::new(Mutex::new(Vec::new())),
+                fail_update: false,
+                fail_complete_once: AtomicBool::new(true),
+            }
+            .into();
+            notify_terminal_completed(&status, E_FAIL).expect("terminal notification recovers");
+            assert_eq!(receiver.try_recv().expect("one completion"), E_FAIL);
+            assert!(receiver.try_recv().is_err(), "no duplicate completion");
+            drop(receiver);
+            assert!(
+                notify_terminal_completed(&status, S_OK).is_err(),
+                "persistent notification failure remains unconfirmed"
+            );
+        }
+
+        #[test]
         fn startup_failures_and_constructor_panic_release_native_lifetimes() {
             struct Handler;
             impl Default for Handler {
@@ -945,6 +974,7 @@ pub mod __native {
                 ("progress", true, true),
                 ("complete", false, false),
                 ("complete-failure", false, true),
+                ("automatic-complete-failure", false, false),
             ] {
                 let mut raw = std::ptr::null_mut();
                 unsafe { get(&clsid, &IClassFactory::IID, &raw mut raw) }
@@ -970,7 +1000,9 @@ pub mod __native {
                     fail_update,
                     fail_complete_once: AtomicBool::new(matches!(
                         mode,
-                        "complete-failure" | "concurrent-complete-failure"
+                        "complete-failure"
+                            | "concurrent-complete-failure"
+                            | "automatic-complete-failure"
                     )),
                 }
                 .into();

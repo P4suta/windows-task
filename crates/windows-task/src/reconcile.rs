@@ -491,6 +491,8 @@ impl Default for ApplyOptions {
     serde(deny_unknown_fields)
 )]
 pub struct ApplyReport {
+    /// Whether apply completed successfully, independently of the number of changes.
+    pub status: ApplyStatus,
     /// Original deterministic plan.
     pub plan: Plan,
     /// Changes successfully attempted before completion or failure.
@@ -505,6 +507,16 @@ pub struct ApplyReport {
     pub unresolved: Vec<Change>,
     /// Stop requests cannot be undone by restoring a task definition.
     pub irreversible_effects: Vec<TaskPath>,
+}
+
+/// Overall apply outcome, including failures before a plan can be constructed.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApplyStatus {
+    /// Apply failed; inspect the failure cause and recovery evidence.
+    Failed,
+    /// Apply completed, including a successful operation with no changes.
+    Succeeded,
 }
 
 /// One phase of an apply or compensation operation.
@@ -567,7 +579,8 @@ impl ApplyReport {
     /// Whether every planned change was applied and no rollback was needed.
     #[must_use]
     pub fn succeeded(&self) -> bool {
-        self.applied.len() == self.plan.changes.len()
+        self.status == ApplyStatus::Succeeded
+            && self.applied.len() == self.plan.changes.len()
             && self.rolled_back.is_empty()
             && self.rollback_failures.is_empty()
             && self.unresolved.is_empty()
@@ -660,6 +673,7 @@ fn apply_backend(
         plan
     };
     let mut report = ApplyReport {
+        status: ApplyStatus::Failed,
         plan: plan.clone(),
         applied: Vec::new(),
         rolled_back: Vec::new(),
@@ -669,6 +683,7 @@ fn apply_backend(
         irreversible_effects: Vec::new(),
     };
     if plan.is_empty() {
+        report.status = ApplyStatus::Succeeded;
         return Ok(report);
     }
     let mut expected = plan
@@ -898,6 +913,7 @@ fn apply_backend(
             return Err(ApplyFailure { cause, report });
         }
     }
+    report.status = ApplyStatus::Succeeded;
     Ok(report)
 }
 
@@ -1269,6 +1285,7 @@ fn empty_apply_failure(cause: Error) -> ApplyFailure {
     ApplyFailure {
         cause,
         report: ApplyReport {
+            status: ApplyStatus::Failed,
             plan: Plan::default(),
             applied: Vec::new(),
             rolled_back: Vec::new(),

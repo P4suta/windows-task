@@ -28,6 +28,9 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 
 ### Fixed
 
+- Apply reports distinguish preflight failures from successful empty plans.
+- Automatic handler completion retries one failed notification and retains an
+  unconfirmed state when both attempts fail.
 - YAML output quotes ambiguous strings, including trailing colons, whitespace
   and control characters found by guided fuzzing, while retaining Rust 1.85.
 - Stop requests during compensation are included in irreversible-effect reports,

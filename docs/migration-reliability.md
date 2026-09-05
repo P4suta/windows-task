@@ -36,6 +36,10 @@ use target-supported explicit settings. This restriction is recorded by the nati
 test artifacts rather than hidden by ignoring the field.
 
 `ApplyReport` includes `journal`, `unresolved` and `irreversible_effects`.
+Its required `status` field is `succeeded` or `failed`. Use `succeeded()` rather
+than inferring success from an empty plan: preflight failures also have empty
+plans, but retain `status: failed`. Complete compensation does not change a
+failed apply into a successful one.
 `rollback_failures` now contains structured `RollbackFailure` values with the
 original `Error`, phase and change. The CLI emits `{ cause, report }` on failure
 and retains exit code 1. A successful apply still emits its report directly.
@@ -59,3 +63,6 @@ state in `Error::context()`. These fields are not automatically logged.
 
 COM handler release builds use unwind so user panics can become failed
 completion. Downstream panic=abort builds still abort the process.
+Automatic terminal notification retries once after failure. Both attempts are
+traced; two failures leave completion unconfirmed. If the first response was
+lost after delivery, the receiver may see the same terminal code again.

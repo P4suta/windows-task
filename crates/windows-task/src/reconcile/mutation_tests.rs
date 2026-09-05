@@ -2,6 +2,40 @@
 use super::*;
 
 #[test]
+fn an_empty_failure_report_is_not_a_successful_no_op() {
+    let (backend, mut manifest) = fixture(0);
+    let report = apply_backend(
+        &backend,
+        &manifest,
+        ApplyOptions::default(),
+        &mut NoCredentials,
+    )
+    .expect("valid no-op");
+    assert!(report.succeeded());
+    assert_eq!(
+        serde_json::to_value(&report).expect("report")["status"],
+        "succeeded"
+    );
+    manifest.namespace = FolderPath::root();
+    let failure = apply_backend(
+        &backend,
+        &manifest,
+        ApplyOptions::default(),
+        &mut NoCredentials,
+    )
+    .expect_err("invalid namespace before planning");
+    assert!(failure.report.plan.is_empty());
+    assert_eq!(
+        serde_json::to_value(&failure.report).expect("failure report")["status"],
+        "failed"
+    );
+    assert!(
+        !failure.report.succeeded(),
+        "preflight failure must not look like a successful no-op"
+    );
+}
+
+#[test]
 fn new_folder_compensation_restores_the_observed_sacl_too() {
     let (backend, mut manifest) = fixture(2);
     apply_fixture(&backend, &manifest);
