@@ -133,7 +133,8 @@ pub struct TaskSettings {
     pub wake_to_run: bool,
     /// Hides the task from default enumeration.
     pub hidden: bool,
-    /// Uses the unified scheduling engine.
+    /// Uses the unified scheduling engine. New definitions default to true;
+    /// legacy schema 1.2 requires an explicit false value.
     pub use_unified_scheduling_engine: bool,
     /// Prevents start in RemoteApp sessions.
     pub disallow_start_on_remote_app_session: bool,
@@ -161,7 +162,7 @@ impl Default for TaskSettings {
             idle: None,
             wake_to_run: false,
             hidden: false,
-            use_unified_scheduling_engine: false,
+            use_unified_scheduling_engine: true,
             disallow_start_on_remote_app_session: false,
             maintenance: None,
             volatile: false,

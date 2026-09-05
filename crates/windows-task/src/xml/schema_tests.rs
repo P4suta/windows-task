@@ -15,6 +15,25 @@ fn round_trip(definition: &TaskDefinition) {
 }
 
 #[test]
+fn new_engine_default_does_not_reinterpret_legacy_xml() {
+    let definition = TaskDefinition::new(Action::Exec(ExecAction::new("fixture.exe")));
+    assert!(definition.settings.use_unified_scheduling_engine);
+    round_trip(&definition);
+    for settings in [
+        "",
+        "<Settings />",
+        "<Settings><UseUnifiedSchedulingEngine>false</UseUnifiedSchedulingEngine></Settings>",
+    ] {
+        let xml = format!(
+            "<Task version=\"1.2\">{settings}<Actions><Exec><Command>fixture.exe</Command></Exec></Actions></Task>"
+        );
+        let legacy = from_bytes(xml.as_bytes()).expect("legacy schema defaults");
+        assert!(!legacy.settings.use_unified_scheduling_engine);
+        round_trip(&legacy);
+    }
+}
+
+#[test]
 fn invalid_native_fields_fail_instead_of_becoming_defaults() {
     for field in [
         "Enabled",

@@ -1,5 +1,18 @@
 # Reliability API migration
 
+## New task settings
+
+`TaskSettings::default()` and `TaskDefinition::new()` now enable unified
+scheduling. Current Windows x64 and ARM64 acceptance runs showed registration
+changing an explicit false to true, causing the conservative apply verifier to
+report a conflict. The new default avoids that mismatch for new modern tasks.
+XML input still treats an absent element as false, as required by the schema.
+Explicit false values are never ignored or silently normalized by reconciliation.
+
+For schema 1.2, set both `definition.schema_version = TaskSchemaVersion::V1_2`
+and `definition.settings.use_unified_scheduling_engine = false`. Verify that the
+target preserves this legacy setting; a changed setting remains unconfirmed.
+
 ## Waiting and history
 
 `WaitOptions::default()` now requires exact instance-correlated completion.

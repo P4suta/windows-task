@@ -121,6 +121,35 @@ pub(super) fn observe(
     }
 }
 
+pub(super) fn verification_conflict(
+    manifest: &TaskManifest,
+    change: &Change,
+    after: &Observed,
+) -> Error {
+    let mut error = Error::new(
+        ErrorKind::Conflict,
+        "post-mutation state cannot safely be attributed to this apply",
+    );
+    if let (
+        Change::CreateTask(path) | Change::UpdateTask(path) | Change::AdoptTask(path),
+        Observed::Task { definition, .. },
+    ) = (change, after)
+    {
+        if let Ok(task) = managed_task(manifest, path) {
+            let expected = task.definition.settings.use_unified_scheduling_engine;
+            let actual = definition.settings.use_unified_scheduling_engine;
+            if expected != actual {
+                // Only a static field name and booleans cross this diagnostic boundary.
+                error = error
+                    .with_context("field", "settings.use_unified_scheduling_engine")
+                    .with_context("expected", expected.to_string())
+                    .with_context("observed", actual.to_string());
+            }
+        }
+    }
+    error
+}
+
 pub(super) fn expected_after(
     backend: &impl Backend,
     before: &Observed,

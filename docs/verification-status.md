@@ -68,6 +68,13 @@ Hosted run `33970893768` identified a missing LocalAccounts PowerShell command o
 both x64 and ARM64. The fixture now uses OS account APIs and preserves allowlisted
 failure metadata. ARM64 artifacts report architecture `aarch64`; all other native
 fixtures passed, but the job remains failed until password acceptance passes too.
+Run `33973365685` then isolated the registration conflict on both architectures:
+Windows changed the requested unified-engine setting from false to true after
+committing the first task. New model defaults now enable the engine; explicit
+false remains significant and a conflict reports the static field and boolean
+values. A shared-backend regression preserves the unconfirmed task, and the local
+default-setting native apply/idempotence test passes. Password recovery still
+requires a passing hosted run after this correction.
 The notification trace assertion first failed because native progress dispatch
 had no reporter parent span (`native-notification-trace-first.log`). Passing
 the allowlisted operation context with each notification fixes the gap;

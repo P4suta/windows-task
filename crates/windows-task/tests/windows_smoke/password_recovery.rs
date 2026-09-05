@@ -93,18 +93,33 @@ fn exercise_recovery(
         |failure| {
             // This fixture constructs all settings itself. Capture only these
             // typed settings and the logon mode, never credentials or actions.
-            let observed = blocking.get_task(&paths[0]).and_then(|task| {
-                let definition = task.snapshot.definition()?;
-                Ok(format!(
-                    "settings={:?}; logon_type={:?}",
-                    definition.settings, definition.principal.logon_type
-                ))
-            });
+            let observed = blocking
+                .get_task(&paths[0])
+                .and_then(|task| {
+                    let definition = task.snapshot.definition()?;
+                    Ok(format!(
+                        "settings={:?}; logon_type={:?}",
+                        definition.settings, definition.principal.logon_type
+                    ))
+                })
+                .unwrap_or_else(|error| {
+                    format!(
+                        "unavailable: kind={:?}; native_code={:?}",
+                        error.kind(),
+                        error.native_code()
+                    )
+                });
+            let journal: Vec<_> = failure
+                .report
+                .journal
+                .iter()
+                .map(|entry| (entry.phase, entry.outcome))
+                .collect();
             failure
                 .cause
                 .with_context("fixture_stage", "initial_registration")
-                .with_context("fixture_observed_settings", format!("{observed:?}"))
-                .with_context("fixture_journal", format!("{:?}", failure.report.journal))
+                .with_context("fixture_observed_settings", observed)
+                .with_context("fixture_journal", format!("{journal:?}"))
         },
     )?;
     let mut desired = original.clone();
