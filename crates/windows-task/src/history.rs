@@ -106,6 +106,20 @@ pub enum ResultConfidence {
     PollingFallback,
 }
 
+/// Why an explicitly permitted estimate was used instead of exact completion.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(Serialize, Deserialize),
+    serde(rename_all = "snake_case")
+)]
+pub enum FallbackReason {
+    /// The Operational channel could not be queried.
+    HistoryUnavailable,
+    /// No matching completion arrived within the polling grace interval.
+    CompletionNotObserved,
+}
+
 /// Final result observed for a task run.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[cfg_attr(
@@ -116,10 +130,15 @@ pub enum ResultConfidence {
 pub struct RunOutcome {
     /// Correlated instance.
     pub instance_id: Uuid,
-    /// Native result or process exit code.
+    /// Raw native result or process exit code. Operational history can encode an
+    /// Exec exit status as an HRESULT (for example, 7 as `0x80070007`). The value
+    /// is preserved so handler and launch failures are never silently reclassified.
     pub result_code: i32,
     /// How confidently this result identifies the requested run.
     pub confidence: ResultConfidence,
+    /// Present only for polling estimates.
+    #[cfg_attr(feature = "serde", serde(default))]
+    pub fallback_reason: Option<FallbackReason>,
 }
 
 /// Decodes one XML document rendered by `EvtRender(EvtRenderEventXml)`.
@@ -244,7 +263,15 @@ pub fn from_event_xml(xml: &str) -> Result<HistoryEvent> {
                     _ => {}
                 }
             }
-            Event::DocType(_) | Event::GeneralRef(_) => {
+            Event::GeneralRef(reference) => {
+                let value = crate::xml::resolve_reference(reference.as_ref())
+                    .map_err(|error| history_xml_error(error.message()))?;
+                let frame = stack
+                    .last_mut()
+                    .ok_or_else(|| history_xml_error("reference outside XML root"))?;
+                frame.text.push_str(&value);
+            }
+            Event::DocType(_) => {
                 return Err(history_xml_error(
                     "DTD declarations and entity references are not allowed",
                 ));
@@ -414,6 +441,104 @@ mod tests {
 
     use super::{HistoryEventKind, from_event_xml, parse_system_time};
     use crate::TaskPath;
+
+    fn event_document(data: &str) -> String {
+        format!(
+            "<Event><System><EventID>201</EventID><EventRecordID>42</EventRecordID><TimeCreated SystemTime='2026-09-05T00:00:00Z'/></System><EventData>{data}</EventData></Event>"
+        )
+    }
+
+    #[test]
+    fn native_result_representations_preserve_all_bits() {
+        for (encoded, expected) in [
+            ("7", 7),
+            ("-1", -1),
+            ("4294967295", -1),
+            ("0xFFFFFFFF", -1),
+            (
+                "0X80070007",
+                i32::from_ne_bytes(0x8007_0007_u32.to_ne_bytes()),
+            ),
+        ] {
+            for name in ["ResultCode", "Result", "ErrorCode", "ActionResult"] {
+                let xml = event_document(&format!("<Data Name='{name}'>{encoded}</Data>"));
+                assert_eq!(
+                    from_event_xml(&xml)
+                        .expect("native code representation")
+                        .result_code,
+                    Some(expected)
+                );
+            }
+        }
+        for encoded in [
+            "4294967296",
+            "-2147483649",
+            "0x100000000",
+            "not-a-number",
+            "9223372036854775808",
+        ] {
+            let xml = event_document(&format!("<Data Name='ResultCode'>{encoded}</Data>"));
+            assert_eq!(
+                from_event_xml(&xml)
+                    .expect_err("unrepresentable result code")
+                    .kind(),
+                crate::ErrorKind::Xml
+            );
+        }
+    }
+
+    #[test]
+    fn event_identity_aliases_cdata_and_unknown_payload_survive_parsing() {
+        let id = Uuid::from_u128(123);
+        for name in ["InstanceId", "InstanceID", "InstanceGuid", "TaskInstanceId"] {
+            let xml = event_document(&format!(
+                "<Data Name='{name}'>{id}</Data><Data Name='TaskPath'>\\Fixture\\Run</Data><Data><![CDATA[opaque & text]]></Data><Data Name='Future'>&lt;value&gt;</Data>"
+            ));
+            let event = from_event_xml(&xml).expect("identity aliases");
+            assert_eq!(event.instance_id, Some(id));
+            assert_eq!(event.fields["Data0"], "opaque & text");
+            assert_eq!(event.fields["Future"], "<value>");
+            assert_eq!(
+                event.task_path.expect("task path").as_str(),
+                "\\Fixture\\Run"
+            );
+        }
+        for data in [
+            "<Data Name='InstanceId'>invalid</Data>",
+            "<Data Name='TaskName'>relative</Data>",
+        ] {
+            from_event_xml(&event_document(data)).expect_err("invalid identity cannot correlate");
+        }
+    }
+
+    #[test]
+    fn malformed_and_oversized_event_documents_fail_before_delivery() {
+        for xml in [
+            "",
+            "<Event>",
+            "<Event></Other>",
+            "<!DOCTYPE Event><Event/>",
+            "<Event>&unknown;</Event>",
+            "<Event><EventID>bad</EventID></Event>",
+            "<Event><EventID>201</EventID><EventRecordID>bad</EventRecordID></Event>",
+            "<Event><EventID>201</EventID></Event>",
+            "<Event><EventID>201</EventID><EventRecordID>1</EventRecordID></Event>",
+            "<Event><TimeCreated SystemTime='invalid'/></Event>",
+        ] {
+            assert_eq!(
+                from_event_xml(xml)
+                    .expect_err("invalid event structure")
+                    .kind(),
+                crate::ErrorKind::Xml
+            );
+        }
+        let too_deep = format!("{}{}", "<Event>".repeat(65), "</Event>".repeat(65));
+        from_event_xml(&too_deep).expect_err("event depth ceiling");
+        let too_many = format!("<Event>{}</Event>", "<Data/>".repeat(10_001));
+        from_event_xml(&too_many).expect_err("event node ceiling");
+        from_event_xml(&"x".repeat(super::MAX_EVENT_XML_BYTES + 1))
+            .expect_err("event byte ceiling");
+    }
 
     #[test]
     fn parses_task_scheduler_event_and_preserves_unknown_fields() {

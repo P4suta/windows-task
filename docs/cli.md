@@ -74,10 +74,13 @@ windows-task history enable --yes
 
 Querying never changes channel configuration. Local history uses the current
 token; remote history opens a separate Event Log RPC session with the same
-one-shot connection credential. `task run --wait` prefers a terminal event
-matched by instance GUID. If history is inaccessible, it reports the registered
-task's last result with `polling_fallback` confidence instead of pretending the
-correlation was exact.
+one-shot connection credential. `task run --wait` requires completion matched by
+instance GUID. Inaccessible history is an error. Add `--allow-polling-fallback`
+to explicitly permit the registered task's last result as an estimate; the
+result includes `polling_fallback` confidence and a reason. Concurrent runs can
+change that estimate. Watch uses bounded forward pages and stops with
+`HistoryGap` when a bookmark is no longer available. `QueryLimit` means a query
+did not establish a complete result within its scan/return bounds.
 
 ## Desired state
 
@@ -96,13 +99,48 @@ before its first mutation.
 Safety switches are intentionally independent:
 
 - `--adopt` permits replacing an unowned collision.
-- `--prune` permits deleting tasks with this manifest's ownership URI only.
+- `--prune` permits deleting tasks with this manifest's ownership marker only.
 - `--stop-running` stops instances before task update/delete.
 - `--allow-irreversible` proceeds when an exact rollback password or ACL cannot
   be captured.
 
 On failure, applied steps are compensated in reverse order. The library's
 `ApplyFailure` retains both the initiating error and any rollback failures.
+CLI apply prints a JSON report on either outcome and retains exit code 1 on
+failure. Inspect `cause`, `report.journal`, `report.unresolved`,
+`report.rollback_failures`, and `report.irreversible_effects`. Restored definitions
+do not undo stopped instances. External changes block automatic compensation.
+
+Keep the original failure before inspecting the remaining state:
+
+```powershell
+windows-task apply .\tasks.toml --yes > .\apply-result.json 2> .\apply.stderr.log
+$applyExit = $LASTEXITCODE
+if ($applyExit -ne 0) {
+    windows-task plan .\tasks.toml > .\remaining-plan.json 2> .\inspection.stderr.log
+    $incident = '.\incident-' + [guid]::NewGuid()
+    windows-task doctor --bundle $incident > .\doctor-result.json
+}
+```
+
+`plan` and `doctor` perform read-only checks. If inspection also fails, preserve
+its error alongside the original apply report; an empty inspection file is not
+evidence of successful recovery. Resolve `unresolved` targets and credential or
+ownership conflicts before issuing another apply. A new run does not replace the
+original failure journal.
+
+## Diagnostic bundles and tracing
+
+```powershell
+windows-task --log-level debug --log-format json --log-file .\operations.jsonl doctor --bundle .\incident-001
+```
+
+`doctor` includes connection failures and performs only read operations. The
+bundle directory must be new. It contains platform information, redacted
+connection settings, diagnostic checks (including failures), and reproduction
+arguments. Target names, credential references, XML and error message bodies are
+excluded from the bundle. Write/registration rights remain unverified. The CLI
+owns tracing setup; library consumers configure their own subscriber.
 
 ## Handler registration
 

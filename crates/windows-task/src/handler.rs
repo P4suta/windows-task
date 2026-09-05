@@ -2,7 +2,7 @@
 
 use std::{
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU8, Ordering},
     },
     thread,
@@ -17,6 +17,60 @@ pub trait TaskHandler: Default + Send + 'static {
     /// Executes one task invocation. Observe `context.control` cooperatively and
     /// return after cancellation is requested.
     fn run(self, context: HandlerContext) -> Result<()>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stop_is_terminal_for_an_invocation() {
+        let control = HandlerControl::default();
+        control.request_pause();
+        assert!(control.is_paused());
+        control.request_stop();
+        control.request_resume();
+        control.request_pause();
+        assert!(control.is_cancelled());
+        assert!(!control.is_paused());
+        control.wait_if_paused();
+        assert!(
+            !HandlerControl::default().is_cancelled(),
+            "new invocation starts independently"
+        );
+    }
+
+    #[test]
+    fn progress_and_completion_are_serialized() {
+        let reporter = ProgressReporter::default();
+        let workers: Vec<_> = (0..=100)
+            .map(|percent| {
+                let reporter = reporter.clone();
+                thread::spawn(move || reporter.report(percent).expect("valid progress"))
+            })
+            .collect();
+        for worker in workers {
+            worker.join().expect("report worker");
+        }
+        assert_eq!(reporter.progress(), 100);
+        reporter.report(10).expect("lower progress is ignored");
+        assert_eq!(reporter.progress(), 100);
+        reporter.complete().expect("first completion");
+        assert_eq!(
+            reporter
+                .complete()
+                .expect_err("duplicate completion")
+                .kind(),
+            crate::ErrorKind::Conflict
+        );
+        assert_eq!(
+            reporter
+                .report(100)
+                .expect_err("report after completion")
+                .kind(),
+            crate::ErrorKind::Conflict
+        );
+    }
 }
 
 /// Data and services available during one handler invocation.
@@ -58,12 +112,16 @@ impl HandlerControl {
 
     #[doc(hidden)]
     pub fn request_pause(&self) {
-        self.state.store(1, Ordering::Release);
+        self.state
+            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+            .unwrap_or(2);
     }
 
     #[doc(hidden)]
     pub fn request_resume(&self) {
-        self.state.store(0, Ordering::Release);
+        self.state
+            .compare_exchange(1, 0, Ordering::AcqRel, Ordering::Acquire)
+            .unwrap_or(2);
     }
 
     #[doc(hidden)]
@@ -75,6 +133,7 @@ impl HandlerControl {
 /// Reporter that accepts monotonic progress until completion.
 #[derive(Clone, Debug, Default)]
 pub struct ProgressReporter {
+    operation: Arc<Mutex<()>>,
     completed: Arc<AtomicBool>,
     progress: Arc<AtomicU8>,
     #[cfg(windows)]
@@ -89,6 +148,14 @@ impl ProgressReporter {
 
     /// Reports monotonic progress with an optional status message.
     pub fn report_with_message(&self, percent: u8, message: &str) -> Result<()> {
+        crate::observe::Operation::new("handler.progress")
+            .run(|| self.report_inner(percent, message))
+    }
+
+    fn report_inner(&self, percent: u8, message: &str) -> Result<()> {
+        let _operation = self.operation.lock().map_err(|_| {
+            crate::Error::new(crate::ErrorKind::WorkerStopped, "handler reporter poisoned")
+        })?;
         if percent > 100 {
             return Err(crate::Error::new(
                 crate::ErrorKind::InvalidDefinition,
@@ -101,7 +168,7 @@ impl ProgressReporter {
                 "handler already completed",
             ));
         }
-        let previous = self.progress.fetch_max(percent, Ordering::AcqRel);
+        let previous = self.progress.load(Ordering::Acquire);
         #[cfg(windows)]
         if percent > previous {
             if let Some(native) = &self.native {
@@ -113,6 +180,7 @@ impl ProgressReporter {
             let _ = previous;
             let _ = message;
         }
+        self.progress.fetch_max(percent, Ordering::AcqRel);
         Ok(())
     }
 
@@ -124,6 +192,13 @@ impl ProgressReporter {
 
     /// Marks completion exactly once.
     pub fn complete(&self) -> Result<()> {
+        crate::observe::Operation::new("handler.complete").run(|| self.complete_inner())
+    }
+
+    fn complete_inner(&self) -> Result<()> {
+        let _operation = self.operation.lock().map_err(|_| {
+            crate::Error::new(crate::ErrorKind::WorkerStopped, "handler reporter poisoned")
+        })?;
         self.completed
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| {
@@ -175,7 +250,7 @@ pub mod __native {
         mem::ManuallyDrop,
         panic::{AssertUnwindSafe, catch_unwind},
         sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicBool, AtomicUsize, Ordering},
             mpsc,
         },
@@ -190,7 +265,8 @@ pub mod __native {
             System::{
                 Com::{
                     COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize, IClassFactory,
-                    IClassFactory_Impl, IStream, Marshal::CoMarshalInterThreadInterfaceInStream,
+                    IClassFactory_Impl, IStream,
+                    Marshal::{CoMarshalInterThreadInterfaceInStream, CoReleaseMarshalData},
                     StructuredStorage::CoGetInterfaceAndReleaseStream,
                 },
                 TaskScheduler::{ITaskHandler, ITaskHandler_Impl, ITaskHandlerStatus},
@@ -210,6 +286,7 @@ pub mod __native {
     static MODULE_OBJECTS: AtomicUsize = AtomicUsize::new(0);
     static SERVER_LOCKS: AtomicUsize = AtomicUsize::new(0);
     static ACTIVE_WORKERS: AtomicUsize = AtomicUsize::new(0);
+    static ACTIVE_REPORTERS: AtomicUsize = AtomicUsize::new(0);
 
     #[derive(Debug)]
     enum StatusCommand {
@@ -227,6 +304,12 @@ pub mod __native {
     #[derive(Debug)]
     pub(crate) struct NativeReporter {
         sender: mpsc::Sender<StatusCommand>,
+    }
+
+    impl Drop for NativeReporter {
+        fn drop(&mut self) {
+            ACTIVE_REPORTERS.fetch_sub(1, Ordering::AcqRel);
+        }
     }
 
     impl NativeReporter {
@@ -257,7 +340,7 @@ pub mod __native {
     where
         T: TaskHandler,
     {
-        control: HandlerControl,
+        control: Mutex<HandlerControl>,
         running: Arc<AtomicBool>,
         marker: PhantomData<fn() -> T>,
     }
@@ -266,7 +349,7 @@ pub mod __native {
         fn new() -> Self {
             MODULE_OBJECTS.fetch_add(1, Ordering::AcqRel);
             Self {
-                control: HandlerControl::default(),
+                control: Mutex::new(HandlerControl::default()),
                 running: Arc::new(AtomicBool::new(false)),
                 marker: PhantomData,
             }
@@ -281,13 +364,23 @@ pub mod __native {
 
     impl<T: TaskHandler> ITaskHandler_Impl for NativeTaskHandler_Impl<T> {
         fn Start(&self, services: Ref<'_, IUnknown>, data: &BSTR) -> windows::core::Result<()> {
+            let mut current_control = self
+                .control
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             self.running
                 .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
                 .map_err(|_| WindowsError::from_hresult(E_FAIL))?;
-            self.control.request_resume();
+            let control = HandlerControl::default();
+            *current_control = control.clone();
+            drop(current_control);
             let prepared = (|| {
                 let data = String::try_from(data.clone())?;
                 let status: ITaskHandlerStatus = services.ok()?.cast()?;
+                #[cfg(test)]
+                if take_test_failure(4) {
+                    return Err(WindowsError::from_hresult(E_FAIL));
+                }
                 let stream = unsafe {
                     CoMarshalInterThreadInterfaceInStream(&ITaskHandlerStatus::IID, &status)
                 }?;
@@ -303,39 +396,87 @@ pub mod __native {
                     return Err(error);
                 }
             };
-            let control = self.control.clone();
             let running = Arc::clone(&self.running);
             ACTIVE_WORKERS.fetch_add(1, Ordering::AcqRel);
-            let spawned = thread::Builder::new()
-                .name("windows-task-handler".into())
-                .spawn(move || handler_worker::<T>(stream_raw, data, control, running));
-            if spawned.is_err() {
+            let trace = crate::observe::Operation::new("handler.invocation");
+            let (ready, initialized) = mpsc::sync_channel(1);
+            let (transfer, packet) = mpsc::sync_channel(1);
+            let spawned = spawn_handler_thread("windows-task-handler", move || {
+                trace.scope(|| {
+                    let _worker = WorkerGuard { running };
+                    let apartment = ComApartment::initialize_handler();
+                    let initialization = apartment.as_ref().map(|_| ()).map_err(Clone::clone);
+                    if ready.send(initialization).is_err() {
+                        return;
+                    }
+                    let Ok(_apartment) = apartment else {
+                        return;
+                    };
+                    let Ok(stream_raw) = packet.recv() else {
+                        return;
+                    };
+                    handler_worker::<T>(stream_raw, data, control);
+                });
+            });
+            let Ok(spawned) = spawned else {
                 ACTIVE_WORKERS.fetch_sub(1, Ordering::AcqRel);
                 self.running.store(false, Ordering::Release);
-                drop(unsafe { IStream::from_raw(stream_raw as *mut c_void) });
+                drop(release_unconsumed_stream(stream_raw));
+                return Err(WindowsError::from_hresult(E_FAIL));
+            };
+            // Only initialization is acknowledged here, never a native RPC.
+            // Until it succeeds the originating apartment owns the packet.
+            let initialization = initialized
+                .recv()
+                .unwrap_or_else(|_| Err(WindowsError::from_hresult(E_FAIL)));
+            if let Err(error) = initialization {
+                drop(spawned.join());
+                drop(release_unconsumed_stream(stream_raw));
+                return Err(error);
+            }
+            if transfer.send(stream_raw).is_err() {
+                drop(spawned.join());
+                drop(release_unconsumed_stream(stream_raw));
                 return Err(WindowsError::from_hresult(E_FAIL));
             }
             Ok(())
         }
 
         fn Stop(&self) -> windows::core::Result<HRESULT> {
-            self.control.request_stop();
+            self.control
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .request_stop();
             Ok(S_OK)
         }
 
         fn Pause(&self) -> windows::core::Result<()> {
-            self.control.request_pause();
+            self.control
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .request_pause();
             Ok(())
         }
 
         fn Resume(&self) -> windows::core::Result<()> {
-            self.control.request_resume();
+            self.control
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .request_resume();
             Ok(())
         }
     }
 
     struct WorkerGuard {
         running: Arc<AtomicBool>,
+    }
+
+    fn release_unconsumed_stream(stream_raw: usize) -> crate::Result<()> {
+        let stream = unsafe { IStream::from_raw(stream_raw as *mut c_void) };
+        crate::observe::Operation::new("handler.release_marshal_data").run(|| {
+            unsafe { CoReleaseMarshalData(&stream) }
+                .map_err(|error| status_error("release unconsumed marshal data", error))
+        })
     }
 
     impl Drop for WorkerGuard {
@@ -349,22 +490,17 @@ pub mod __native {
         stream_raw: usize,
         data: Option<String>,
         control: HandlerControl,
-        running: Arc<AtomicBool>,
     ) {
-        let _worker = WorkerGuard { running };
-        let Ok(apartment) = ComApartment::initialize() else {
-            drop(unsafe { IStream::from_raw(stream_raw as *mut c_void) });
-            return;
-        };
         let stream = ManuallyDrop::new(unsafe { IStream::from_raw(stream_raw as *mut c_void) });
         let Ok(status) =
             (unsafe { CoGetInterfaceAndReleaseStream::<_, ITaskHandlerStatus>(&*stream) })
         else {
-            drop(apartment);
             return;
         };
         let (sender, receiver) = mpsc::channel();
+        ACTIVE_REPORTERS.fetch_add(1, Ordering::AcqRel);
         let reporter = ProgressReporter {
+            operation: Arc::new(Mutex::new(())),
             completed: Arc::new(AtomicBool::new(false)),
             progress: Arc::new(std::sync::atomic::AtomicU8::new(0)),
             native: Some(Arc::new(NativeReporter {
@@ -378,20 +514,26 @@ pub mod __native {
             reporter,
         };
         let done_sender = sender.clone();
-        let user = thread::Builder::new()
-            .name("windows-task-handler-user".into())
-            .spawn(move || {
-                let result = T::default().run(context);
-                if done_sender
-                    .send(StatusCommand::HandlerDone(result))
-                    .is_err()
-                {
-                    // The COM status worker has already terminated.
-                }
+        let user_trace = crate::observe::Operation::new("handler.user");
+        let user = spawn_handler_thread("windows-task-handler-user", move || {
+            let result = user_trace.run(|| {
+                catch_unwind(AssertUnwindSafe(|| T::default().run(context))).unwrap_or_else(|_| {
+                    Err(crate::Error::new(
+                        crate::ErrorKind::Other,
+                        "handler panicked",
+                    ))
+                })
             });
+            if done_sender
+                .send(StatusCommand::HandlerDone(result))
+                .is_err()
+            {
+                // The COM status worker has already terminated.
+            }
+        });
         drop(sender);
         let Ok(user) = user else {
-            drop(unsafe { status.TaskCompleted(E_FAIL) });
+            drop(notify_terminal_completed(&status, E_FAIL));
             return;
         };
         let mut received_handler_done = false;
@@ -410,8 +552,7 @@ pub mod __native {
                     }
                 }
                 StatusCommand::Complete { reply } => {
-                    let result = unsafe { status.TaskCompleted(S_OK) }
-                        .map_err(|error| status_error("complete handler task", error));
+                    let result = notify_completed(&status, S_OK);
                     if result.is_err() {
                         // Let the final HandlerDone command retry completion. Resetting
                         // before the reply also closes the race with the user thread.
@@ -431,22 +572,76 @@ pub mod __native {
                                 .filter(|code| *code < 0)
                                 .map_or(E_FAIL, HRESULT),
                         };
-                        drop(unsafe { status.TaskCompleted(code) });
+                        if notify_terminal_completed(&status, code).is_err() {
+                            completed.store(false, Ordering::Release);
+                        }
                     }
                     break;
                 }
             }
         }
         let joined = user.join();
-        if (!received_handler_done || joined.is_err()) && !completed.swap(true, Ordering::AcqRel) {
-            drop(unsafe { status.TaskCompleted(E_FAIL) });
+        if (!received_handler_done || joined.is_err())
+            && !completed.swap(true, Ordering::AcqRel)
+            && notify_terminal_completed(&status, E_FAIL).is_err()
+        {
+            completed.store(false, Ordering::Release);
         }
-        drop(apartment);
+    }
+
+    fn notify_terminal_completed(status: &ITaskHandlerStatus, code: HRESULT) -> crate::Result<()> {
+        // There is no user caller left to retry an automatic completion. Keep
+        // both attempts in the trace and leave completion unconfirmed if both
+        // fail. A lost response may cause redelivery of the same terminal code.
+        crate::observe::Operation::new("handler.terminal_completion")
+            .run(|| notify_completed(status, code).or_else(|_| notify_completed(status, code)))
+    }
+
+    fn notify_completed(status: &ITaskHandlerStatus, code: HRESULT) -> crate::Result<()> {
+        crate::observe::Operation::new("handler.notify_completion").run(|| {
+            unsafe { status.TaskCompleted(code) }
+                .map_err(|error| status_error("complete handler task", error))
+        })
+    }
+
+    fn spawn_handler_thread(
+        name: &'static str,
+        work: impl FnOnce() + Send + 'static,
+    ) -> std::io::Result<thread::JoinHandle<()>> {
+        #[cfg(test)]
+        if take_test_failure(if name == "windows-task-handler-user" {
+            3
+        } else {
+            1
+        }) {
+            return Err(std::io::Error::other(
+                "injected handler thread creation failure",
+            ));
+        }
+        thread::Builder::new().name(name.into()).spawn(work)
+    }
+
+    #[cfg(test)]
+    static TEST_FAILURE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+    #[cfg(test)]
+    fn take_test_failure(stage: u8) -> bool {
+        TEST_FAILURE
+            .compare_exchange(stage, 0, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
     }
 
     struct ComApartment;
 
     impl ComApartment {
+        fn initialize_handler() -> windows::core::Result<Self> {
+            #[cfg(test)]
+            if take_test_failure(2) {
+                return Err(WindowsError::from_hresult(E_FAIL));
+            }
+            Self::initialize()
+        }
+
         fn initialize() -> windows::core::Result<Self> {
             unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok()?;
             Ok(Self)
@@ -542,6 +737,7 @@ pub mod __native {
         if MODULE_OBJECTS.load(Ordering::Acquire) == 0
             && SERVER_LOCKS.load(Ordering::Acquire) == 0
             && ACTIVE_WORKERS.load(Ordering::Acquire) == 0
+            && ACTIVE_REPORTERS.load(Ordering::Acquire) == 0
         {
             S_OK
         } else {
@@ -560,5 +756,310 @@ pub mod __native {
         crate::Error::new(crate::ErrorKind::Com, error.message())
             .with_operation(operation)
             .with_native_code(error.code().0)
+    }
+
+    #[cfg(test)]
+    mod native_tests {
+        use super::*;
+        use std::time::{Duration, Instant};
+        use windows::{
+            Win32::{
+                Foundation::FreeLibrary,
+                System::{
+                    LibraryLoader::{GetProcAddress, LoadLibraryW},
+                    TaskScheduler::ITaskHandlerStatus_Impl,
+                },
+            },
+            core::s,
+        };
+
+        #[implement(ITaskHandlerStatus)]
+        struct Status {
+            completed: mpsc::Sender<HRESULT>,
+            progress: Arc<Mutex<Vec<i16>>>,
+            fail_update: bool,
+            fail_complete_once: AtomicBool,
+        }
+        impl ITaskHandlerStatus_Impl for Status_Impl {
+            fn UpdateStatus(&self, percent: i16, _: &BSTR) -> windows::core::Result<()> {
+                if self.fail_update {
+                    return Err(WindowsError::from_hresult(E_FAIL));
+                }
+                self.progress
+                    .lock()
+                    .expect("fixture progress")
+                    .push(percent);
+                Ok(())
+            }
+            fn TaskCompleted(&self, code: HRESULT) -> windows::core::Result<()> {
+                if self.fail_complete_once.swap(false, Ordering::AcqRel) {
+                    return Err(WindowsError::from_hresult(E_FAIL));
+                }
+                self.completed
+                    .send(code)
+                    .map_err(|_| WindowsError::from_hresult(E_FAIL))
+            }
+        }
+
+        #[test]
+        fn automatic_completion_retries_a_failed_notification() {
+            let _apartment = ComApartment::initialize().expect("test apartment");
+            let (completed, receiver) = mpsc::channel();
+            let status: ITaskHandlerStatus = Status {
+                completed,
+                progress: Arc::new(Mutex::new(Vec::new())),
+                fail_update: false,
+                fail_complete_once: AtomicBool::new(true),
+            }
+            .into();
+            notify_terminal_completed(&status, E_FAIL).expect("terminal notification recovers");
+            assert_eq!(receiver.try_recv().expect("one completion"), E_FAIL);
+            assert!(receiver.try_recv().is_err(), "no duplicate completion");
+            drop(receiver);
+            assert!(
+                notify_terminal_completed(&status, S_OK).is_err(),
+                "persistent notification failure remains unconfirmed"
+            );
+        }
+
+        #[test]
+        fn startup_failures_and_constructor_panic_release_native_lifetimes() {
+            struct Handler;
+            impl Default for Handler {
+                fn default() -> Self {
+                    assert!(!take_test_failure(6), "injected constructor panic");
+                    Self
+                }
+            }
+            impl TaskHandler for Handler {
+                fn run(self, _: HandlerContext) -> crate::Result<()> {
+                    Ok(())
+                }
+            }
+            let _apartment = ComApartment::initialize().expect("test apartment");
+            for stage in [1, 2, 3, 4, 6] {
+                let handler: ITaskHandler = NativeTaskHandler::<Handler>::new().into();
+                let (completed, receiver) = mpsc::channel();
+                let progress = Arc::new(Mutex::new(Vec::new()));
+                let status: ITaskHandlerStatus = Status {
+                    completed,
+                    progress: Arc::clone(&progress),
+                    fail_update: false,
+                    fail_complete_once: AtomicBool::new(false),
+                }
+                .into();
+                let services: IUnknown = status.cast().expect("status identity");
+                TEST_FAILURE.store(stage, Ordering::Release);
+                let started = unsafe { handler.Start(&services, &BSTR::new()) };
+                if matches!(stage, 3 | 6) {
+                    started.expect("native worker started");
+                    assert!(
+                        receiver
+                            .recv_timeout(Duration::from_secs(5))
+                            .expect("failure notification")
+                            .is_err()
+                    );
+                } else {
+                    assert!(started.is_err(), "startup stage {stage}");
+                }
+                assert_eq!(
+                    TEST_FAILURE.load(Ordering::Acquire),
+                    0,
+                    "fault was exercised"
+                );
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    if unsafe { handler.Start(&services, &BSTR::new()) }.is_ok() {
+                        break;
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "restart after failed stage {stage}"
+                    );
+                    thread::yield_now();
+                }
+                assert!(
+                    receiver
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("healthy restart")
+                        .is_ok()
+                );
+                drop((services, status, handler));
+                while (ACTIVE_WORKERS.load(Ordering::Acquire) != 0
+                    || Arc::strong_count(&progress) != 1)
+                    && Instant::now() < deadline
+                {
+                    thread::yield_now();
+                }
+                assert_eq!(
+                    Arc::strong_count(&progress),
+                    1,
+                    "status reference after stage {stage}"
+                );
+                assert_eq!(ACTIVE_WORKERS.load(Ordering::Acquire), 0);
+                assert_eq!(ACTIVE_REPORTERS.load(Ordering::Acquire), 0);
+            }
+        }
+
+        #[test]
+        fn unconsumed_marshal_packet_releases_the_status_reference() {
+            let _apartment = ComApartment::initialize().expect("test COM apartment");
+            let (completed, _receiver) = mpsc::channel();
+            let progress = Arc::new(Mutex::new(Vec::new()));
+            let status: ITaskHandlerStatus = Status {
+                completed,
+                progress: Arc::clone(&progress),
+                fail_update: false,
+                fail_complete_once: AtomicBool::new(false),
+            }
+            .into();
+            let stream =
+                unsafe { CoMarshalInterThreadInterfaceInStream(&ITaskHandlerStatus::IID, &status) }
+                    .expect("marshal status");
+            drop(status);
+            assert_eq!(Arc::strong_count(&progress), 2, "packet retains status");
+            release_unconsumed_stream(stream.into_raw() as usize)
+                .expect("abandon packet on original apartment");
+            assert_eq!(
+                Arc::strong_count(&progress),
+                1,
+                "marshal reference was released"
+            );
+        }
+
+        fn assert_fixture_progress(mode: &str, failed: bool, progress: &[i16]) {
+            if mode == "progress" && !failed {
+                assert_eq!(progress, [25, 75, 100]);
+            }
+            if mode == "concurrent-progress" {
+                if failed {
+                    assert!(progress.is_empty(), "failed updates are not acknowledged");
+                } else {
+                    assert_eq!(progress.last(), Some(&100));
+                    assert!(progress.windows(2).all(|pair| pair[0] < pair[1]));
+                }
+            }
+        }
+
+        #[test]
+        #[ignore = "requires release fixture DLL; cargo xtask test --suite windows"]
+        fn release_dll_lifecycle_and_panic_containment() {
+            let path = std::env::var("WINDOWS_TASK_HANDLER_DLL").expect("release fixture DLL path");
+            let _apartment = ComApartment::initialize().expect("test MTA");
+            // All raw exports are loaded from the fixture built by this repository.
+            let module = unsafe { LoadLibraryW(&BSTR::from(path)) }.expect("load fixture DLL");
+            type GetClassObject =
+                unsafe extern "system" fn(*const GUID, *const GUID, *mut *mut c_void) -> HRESULT;
+            type CanUnload = unsafe extern "system" fn() -> HRESULT;
+            let get: GetClassObject = unsafe {
+                std::mem::transmute(
+                    GetProcAddress(module, s!("DllGetClassObject")).expect("factory export"),
+                )
+            };
+            let can_unload: CanUnload = unsafe {
+                std::mem::transmute(
+                    GetProcAddress(module, s!("DllCanUnloadNow")).expect("unload export"),
+                )
+            };
+            let clsid = GUID::from_u128(0x08c5_0c37_3d58_4c7f_b13f_1b31_9e1b_1301);
+            for (mode, fail_update, expected_failure) in [
+                ("progress", false, false),
+                ("concurrent-progress", false, false),
+                ("concurrent-progress", true, true),
+                ("concurrent-complete", false, false),
+                ("concurrent-complete-failure", false, false),
+                ("wait", false, false),
+                ("panic", false, true),
+                ("panic-retained", false, true),
+                ("progress", true, true),
+                ("complete", false, false),
+                ("complete-failure", false, true),
+                ("automatic-complete-failure", false, false),
+            ] {
+                let mut raw = std::ptr::null_mut();
+                unsafe { get(&clsid, &IClassFactory::IID, &raw mut raw) }
+                    .ok()
+                    .expect("class factory");
+                let factory = unsafe { IClassFactory::from_raw(raw) };
+                let handler: ITaskHandler =
+                    unsafe { factory.CreateInstance(None::<&IUnknown>) }.expect("create handler");
+                let unsupported_services: IUnknown = factory.cast().expect("factory identity");
+                assert!(
+                    unsafe {
+                        handler.Start(&unsupported_services, &BSTR::from("invalid-services"))
+                    }
+                    .is_err(),
+                    "failed status preparation must not leave the invocation running"
+                );
+                drop(unsupported_services);
+                let (completed, receiver) = mpsc::channel();
+                let progress = Arc::new(Mutex::new(Vec::new()));
+                let status: ITaskHandlerStatus = Status {
+                    completed,
+                    progress: Arc::clone(&progress),
+                    fail_update,
+                    fail_complete_once: AtomicBool::new(matches!(
+                        mode,
+                        "complete-failure"
+                            | "concurrent-complete-failure"
+                            | "automatic-complete-failure"
+                    )),
+                }
+                .into();
+                let services: IUnknown = status.cast().expect("status services");
+                unsafe { handler.Start(&services, &BSTR::from(mode)) }.expect("start handler");
+                if mode == "wait" {
+                    unsafe { handler.Pause() }.expect("pause");
+                    unsafe { handler.Stop() }
+                        .expect("stop")
+                        .ok()
+                        .expect("stop status");
+                    unsafe { handler.Resume() }.expect("resume after stop");
+                    unsafe { handler.Pause() }.expect("pause after stop");
+                }
+                let result = receiver
+                    .recv_timeout(Duration::from_secs(10))
+                    .expect("completion even after panic with retained clone");
+                assert_eq!(result.is_err(), expected_failure, "fixture mode {mode}");
+                assert_fixture_progress(mode, fail_update, &progress.lock().expect("progress"));
+                if mode == "wait" {
+                    // Reuse the same COM object after Stop. A completion callback
+                    // can arrive just before the previous worker releases running.
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    loop {
+                        if unsafe { handler.Start(&services, &BSTR::from("fresh-control")) }.is_ok()
+                        {
+                            break;
+                        }
+                        assert!(
+                            Instant::now() < deadline,
+                            "same handler must accept a new Start"
+                        );
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    assert!(
+                        receiver
+                            .recv_timeout(Duration::from_secs(5))
+                            .expect("second invocation")
+                            .is_ok()
+                    );
+                }
+                drop((services, status, handler, factory));
+                let deadline = Instant::now() + Duration::from_secs(10);
+                while unsafe { can_unload() } != S_OK && Instant::now() < deadline {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                assert_eq!(
+                    unsafe { can_unload() },
+                    S_OK,
+                    "DLL remains referenced after {mode}"
+                );
+                assert!(
+                    receiver.try_recv().is_err(),
+                    "completion must be reported once"
+                );
+            }
+            unsafe { FreeLibrary(module) }.expect("unload released fixture");
+        }
     }
 }

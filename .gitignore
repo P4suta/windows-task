@@ -13,6 +13,11 @@ Thumbs.db
 *.log
 .scratch/
 /target/
+/crates/*/target/
+/fixtures/*/target/
+/fuzz/target/
+/fuzz/artifacts/
+/fuzz/corpus/
 
 # Direnv
 .envrc.local

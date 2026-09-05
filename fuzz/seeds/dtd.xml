@@ -1,0 +1,1 @@
+<!DOCTYPE Task [<!ENTITY private SYSTEM "file:///not-a-real-input">]><Task>&private;</Task>

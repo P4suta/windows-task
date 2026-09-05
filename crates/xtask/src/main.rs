@@ -14,6 +14,8 @@ use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use uuid::Uuid;
 
+mod verification;
+
 /// `cargo xtask` CLI surface.
 #[derive(Debug, Parser)]
 #[command(name = "xtask", version, about = "windows-task development automation")]
@@ -26,8 +28,24 @@ struct Cli {
 /// Available subcommands.
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Scan source safety rules without requiring a Unix shell.
+    StrictCode,
+    /// Save platform-specific coverage without conflating compile-only targets.
+    Coverage,
     /// Run formatting, Clippy, tests, and Windows cross-target checks.
-    Ci,
+    Ci {
+        /// Select native mutation tests only on a disposable Windows host.
+        #[arg(long, value_enum, default_value_t = verification::Suite::Portable)]
+        suite: verification::Suite,
+    },
+    /// Run recorded test suites without disguising skipped native tests as passes.
+    Test {
+        /// Suite to execute. Native mutation tests require a disposable Windows host.
+        #[arg(long, value_enum, default_value_t = verification::Suite::Portable)]
+        suite: verification::Suite,
+    },
+    /// Build isolated consumers from the actual publishable crate archives.
+    Package,
     /// Check the library and CLI for supported Windows architectures.
     CheckWindows {
         /// Architecture selection.
@@ -120,20 +138,11 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        Command::Ci => {
-            cargo(&["fmt", "--all", "--", "--check"])?;
-            cargo(&[
-                "clippy",
-                "--workspace",
-                "--all-targets",
-                "--all-features",
-                "--",
-                "-D",
-                "warnings",
-            ])?;
-            cargo(&["test", "--workspace", "--all-features"])?;
-            check_windows(Architecture::All)
-        }
+        Command::StrictCode => verification::strict_code(),
+        Command::Coverage => verification::coverage(),
+        Command::Ci { suite } => verification::ci(suite),
+        Command::Test { suite } => verification::test(suite),
+        Command::Package => verification::package(),
         Command::CheckWindows { architecture } => check_windows(architecture),
         Command::Msrv => {
             cargo(&["check", "--workspace", "--all-targets", "--all-features"])?;
@@ -238,7 +247,11 @@ fn write_reg_file(
     let body = if unregister {
         format!("Windows Registry Editor Version 5.00\r\n\r\n[-{key}]\r\n")
     } else {
-        let escaped = dll.display().to_string().replace('\\', "\\\\");
+        let path = dll.display().to_string();
+        if path.contains(['\r', '\n', '\0']) {
+            bail!("handler DLL path contains a registry line delimiter");
+        }
+        let escaped = path.replace('\\', "\\\\").replace('"', "\\\"");
         format!(
             "Windows Registry Editor Version 5.00\r\n\r\n[{key}]\r\n@=\"{escaped}\"\r\n\"ThreadingModel\"=\"Both\"\r\n"
         )
@@ -297,5 +310,89 @@ fn run_process(command: &mut ProcessCommand) -> Result<()> {
         Ok(())
     } else {
         bail!("{command:?} exited with {status}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn registry_files_are_utf16_and_never_imported_by_generation() {
+        let directory = std::env::temp_dir().join(format!("handler-reg-{}", Uuid::new_v4()));
+        std::fs::create_dir(&directory).expect("fixture directory");
+        let clsid = Uuid::from_u128(123);
+        let dll = directory.join("unicode-実行.dll");
+        let output = directory.join("fixture.reg");
+        for (scope, hive) in [
+            (RegistryScope::User, "HKEY_CURRENT_USER"),
+            (RegistryScope::Machine, "HKEY_LOCAL_MACHINE"),
+        ] {
+            for unregister in [false, true] {
+                run(Cli {
+                    command: Command::Handler {
+                        command: HandlerCommand::RegFile {
+                            clsid,
+                            dll: dll.clone(),
+                            scope,
+                            output: output.clone(),
+                            unregister,
+                        },
+                    },
+                })
+                .expect("generation requires no native registry access");
+                let bytes = std::fs::read(&output).expect("generated file");
+                assert_eq!(&bytes[..2], &[0xFF, 0xFE]);
+                let units: Vec<_> = bytes[2..]
+                    .chunks_exact(2)
+                    .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
+                    .collect();
+                let text = String::from_utf16(&units).expect("UTF-16 registry file");
+                assert!(text.starts_with("Windows Registry Editor Version 5.00\r\n"));
+                assert!(text.contains(hive));
+                assert_eq!(text.contains("[-"), unregister);
+                assert_eq!(text.contains("unicode-実行.dll"), !unregister);
+                assert_eq!(text.contains("\"ThreadingModel\"=\"Both\""), !unregister);
+            }
+        }
+        std::fs::remove_file(output).expect("cleanup own file");
+        std::fs::remove_dir(directory).expect("cleanup own directory");
+    }
+
+    #[test]
+    fn registry_mutation_requires_acknowledgement_and_absolute_input() {
+        let clsid = Uuid::nil();
+        for yes in [false, true] {
+            handler_command(HandlerCommand::Register {
+                clsid,
+                dll: PathBuf::from("relative.dll"),
+                scope: RegistryScope::User,
+                yes,
+            })
+            .expect_err("unacknowledged or relative registry mutation rejected");
+        }
+        handler_command(HandlerCommand::Unregister {
+            clsid,
+            scope: RegistryScope::Machine,
+            yes: false,
+        })
+        .expect_err("removal requires acknowledgement");
+        assert!(
+            registry_server_key(RegistryScope::User, clsid)
+                .to_string_lossy()
+                .starts_with("HKCU\\")
+        );
+        assert!(
+            registry_class_key(RegistryScope::Machine, clsid)
+                .to_string_lossy()
+                .starts_with("HKLM\\")
+        );
+        run_process(&mut ProcessCommand::new(
+            "windows-task-deliberately-missing-program",
+        ))
+        .expect_err("process startup error is propagated");
+        run_process(ProcessCommand::new("rustc").arg("--not-a-rustc-option"))
+            .expect_err("unsuccessful child is propagated");
+        run_process(ProcessCommand::new("rustc").arg("--version")).expect("successful process");
     }
 }

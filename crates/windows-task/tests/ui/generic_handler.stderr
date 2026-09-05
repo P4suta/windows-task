@@ -1,0 +1,5 @@
+error: handler implementations must use a concrete, non-generic type
+ --> tests/ui/generic_handler.rs:3:5
+  |
+3 | impl<T> Default for Invalid<T> {
+  |     ^^^

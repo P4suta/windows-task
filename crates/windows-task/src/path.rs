@@ -233,6 +233,52 @@ mod tests {
     use std::str::FromStr;
 
     #[test]
+    fn traversal_separators_and_empty_components_cannot_escape_a_namespace() {
+        let folder = FolderPath::root().join("fixture").expect("namespace");
+        for component in [
+            "",
+            ".",
+            "..",
+            "child/other",
+            "child\\other",
+            "\0",
+            " child",
+            "child ",
+        ] {
+            folder
+                .join(component)
+                .expect_err("folder must remain one component");
+            folder
+                .task(component)
+                .expect_err("task must remain one component");
+        }
+        for path in [
+            "relative",
+            "\\fixture\\",
+            "\\fixture\\..\\outside",
+            "\\fixture\\\\child",
+            "\\fixture\0child",
+        ] {
+            TaskPath::from_str(path).expect_err("invalid task boundary");
+            FolderPath::from_str(path).expect_err("invalid folder boundary");
+        }
+        assert_eq!(FolderPath::root().parent(), None);
+        assert_eq!(FolderPath::root().name(), None);
+        let child = folder.join("子フォルダー").expect("Unicode child");
+        assert_eq!(child.parent(), Some(folder));
+        assert_eq!(child.name(), Some("子フォルダー"));
+        assert_eq!(
+            FolderPath::try_from(String::from(child.clone())).expect("owned path conversion"),
+            child
+        );
+        let task = child.task("run").expect("task");
+        assert_eq!(
+            TaskPath::try_from(String::from(task.clone())).expect("owned task conversion"),
+            task
+        );
+    }
+
+    #[test]
     fn canonicalizes_forward_slashes() {
         let path = TaskPath::from_str("/Acme/Backup").expect("valid path");
         assert_eq!(path.as_str(), "\\Acme\\Backup");

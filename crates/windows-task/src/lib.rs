@@ -1,4 +1,4 @@
-#![doc = include_str!("../../../README.md")]
+#![doc = include_str!("../README.md")]
 #![deny(unsafe_code)]
 
 //! `windows-task` keeps Task Scheduler's COM details behind task-oriented,
@@ -7,6 +7,8 @@
 
 mod credentials;
 mod error;
+#[cfg(any(feature = "client", feature = "handler"))]
+mod observe;
 mod path;
 mod validation;
 

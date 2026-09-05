@@ -32,6 +32,23 @@ pub(super) struct Session {
 }
 
 impl Session {
+    #[cfg(feature = "reconcile")]
+    pub(super) fn normalize_definition(
+        &mut self,
+        _definition: TaskDefinition,
+    ) -> Result<TaskDefinition> {
+        Err(unsupported())
+    }
+
+    #[cfg(feature = "reconcile")]
+    pub(super) fn normalize_security(
+        &mut self,
+        _descriptor: SecurityDescriptor,
+        _information: SecurityInformation,
+    ) -> Result<SecurityDescriptor> {
+        Err(unsupported())
+    }
+
     pub(super) fn connect(input: ConnectionInput) -> Result<Self> {
         drop((input.credential, input.com_security));
         Err(unsupported().with_target(input.target.unwrap_or_else(|| "local".into())))
@@ -55,7 +72,26 @@ impl Session {
     }
 
     #[cfg(feature = "history")]
+    pub(super) fn run_history(&mut self, _query: HistoryQuery) -> Result<Vec<HistoryEvent>> {
+        Err(unsupported())
+    }
+
+    #[cfg(feature = "history")]
+    pub(super) fn history_page(
+        &mut self,
+        _query: HistoryQuery,
+        _cursor: Option<super::watch::Cursor>,
+    ) -> Result<super::watch::Page> {
+        Err(unsupported())
+    }
+
+    #[cfg(feature = "history")]
     pub(super) fn set_history_enabled(&mut self, _enabled: bool) -> Result<()> {
+        Err(unsupported())
+    }
+
+    #[cfg(feature = "history")]
+    pub(super) fn history_enabled(&mut self) -> Result<bool> {
         Err(unsupported())
     }
 
@@ -95,6 +131,17 @@ impl Session {
     }
 
     pub(super) fn delete_task(&mut self, _path: TaskPath) -> Result<()> {
+        Err(unsupported())
+    }
+
+    #[cfg(feature = "reconcile")]
+    pub(super) fn register_raw_commit(
+        &mut self,
+        _path: TaskPath,
+        _xml: RawTaskXml,
+        _logon_type: LogonType,
+        _options: RegistrationOptions,
+    ) -> Result<()> {
         Err(unsupported())
     }
 

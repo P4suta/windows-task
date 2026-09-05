@@ -12,6 +12,7 @@ that links back.
 | [0003](./adr/0003-use-a-bounded-lossless-xml-boundary.md) | Use a bounded, lossless Task XML boundary | accepted |
 | [0004](./adr/0004-make-reconciliation-owned-and-compensating.md) | Make reconciliation owned and compensating | accepted |
 | [0005](./adr/0005-generate-a-contained-com-handler-server.md) | Generate a contained COM handler server | accepted |
+| [0006](./adr/0006-make-failures-observable-and-reproducible.md) | Make failures observable and reproducible | accepted |
 
 ## Authoring a new ADR
 

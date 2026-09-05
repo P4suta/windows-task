@@ -3,11 +3,17 @@
 # add their own entries (rustc, node, deno, …) when applied.
 
 [tools]
+node                          = "22"
 just                          = "latest"
 lefthook                      = "latest"
 "github:crate-ci/typos"      = "latest"
 actionlint                    = "latest"
 yamllint                      = "latest"
-"npm:markdownlint-cli2"      = "latest"
+"npm:markdownlint-cli2"      = "0.23.2"
 "github:crate-ci/committed"  = "latest"
 ripgrep                       = "latest"
+
+[settings.npm]
+# The embedded installer omitted unicorn-magic from globby's Windows tree in
+# CI run 33957154658. Use npm's dependency installation on both local and CI hosts.
+package_manager = "npm"

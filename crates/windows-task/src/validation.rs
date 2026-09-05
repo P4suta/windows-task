@@ -92,22 +92,24 @@ pub struct Diagnostic {
 
 impl Diagnostic {
     fn error(code: DiagnosticCode, path: impl Into<String>, message: impl Into<String>) -> Self {
+        let remediation = Some(code.remediation().into());
         Self {
             level: DiagnosticLevel::Error,
             code,
             path: path.into(),
             message: message.into(),
-            remediation: None,
+            remediation,
         }
     }
 
     fn warning(code: DiagnosticCode, path: impl Into<String>, message: impl Into<String>) -> Self {
+        let remediation = Some(code.remediation().into());
         Self {
             level: DiagnosticLevel::Warning,
             code,
             path: path.into(),
             message: message.into(),
-            remediation: None,
+            remediation,
         }
     }
 
@@ -116,6 +118,39 @@ impl Diagnostic {
     pub fn with_remediation(mut self, remediation: impl Into<String>) -> Self {
         self.remediation = Some(remediation.into());
         self
+    }
+}
+
+impl DiagnosticCode {
+    fn remediation(&self) -> &'static str {
+        match self {
+            Self::MissingAction => "Add at least one Exec or COM handler action.",
+            Self::DuplicateId => "Assign a unique identifier to each sibling element.",
+            Self::EmptyValue => "Supply a non-empty value for the indicated field.",
+            Self::OutOfRange => "Set the field within the range stated in the diagnostic.",
+            Self::IncompleteTrigger => {
+                "Supply the missing boundary and schedule selections for this trigger."
+            }
+            Self::PrincipalLogonMismatch => {
+                "Choose an identity and logon type that describe the same user, group or service account."
+            }
+            Self::PasswordRequired => {
+                "Provide the registration password through a credential resolver, not through the definition."
+            }
+            Self::DeprecatedAction => {
+                "Replace the legacy action with an Exec or COM handler action supported by the target."
+            }
+            Self::SchemaTooOld => {
+                "Raise the schema version on a compatible target or remove the newer field."
+            }
+            Self::RegistrationTriggerSideEffect => {
+                "Suppress registration triggers unless their execution is intended."
+            }
+            Self::OpaqueExtension => {
+                "Preserve the raw XML and validate the extension against the target scheduler."
+            }
+            _ => "Inspect the indicated field and correct the condition described before retrying.",
+        }
     }
 }
 
@@ -421,6 +456,13 @@ fn validate_schema(definition: &TaskDefinition, report: &mut ValidationReport) {
         TaskSchemaVersion::V1_5 => 5,
         TaskSchemaVersion::V1_6 | TaskSchemaVersion::Unknown(_) => 6,
     };
+    if definition.settings.use_unified_scheduling_engine && generation < 3 {
+        report.push(Diagnostic::error(
+            DiagnosticCode::SchemaTooOld,
+            "settings.use_unified_scheduling_engine",
+            "unified scheduling requires schema 1.3 or later",
+        ));
+    }
     if definition.settings.maintenance.is_some() && generation < 4 {
         report.push(Diagnostic::error(
             DiagnosticCode::SchemaTooOld,
@@ -440,6 +482,60 @@ fn validate_schema(definition: &TaskDefinition, report: &mut ValidationReport) {
 #[cfg(test)]
 mod tests {
     use crate::model::{Action, ExecAction, LogonType, PrincipalIdentity, TaskDefinition};
+
+    #[test]
+    fn invalid_definitions_report_all_actionable_field_locations() {
+        let xml = br"<Task><Principals><Principal id=''/></Principals><Settings><Priority>11</Priority></Settings><Actions><Exec id='duplicate'><Command/></Exec><Exec id='duplicate'><Command>fixture.exe</Command></Exec></Actions></Task>";
+        let definition = crate::xml::from_bytes(xml).expect("syntactically valid definition");
+        let report = definition.validate();
+        assert!(!report.is_valid());
+        for path in [
+            "principal.id",
+            "settings.priority",
+            "actions",
+            "actions[0].command",
+        ] {
+            let diagnostic = report
+                .errors()
+                .find(|diagnostic| diagnostic.path == path)
+                .expect("specific field diagnostic");
+            assert!(!diagnostic.message.is_empty());
+            assert!(
+                diagnostic
+                    .remediation
+                    .as_ref()
+                    .is_some_and(|text| !text.is_empty())
+            );
+        }
+        let error =
+            crate::xml::to_string(&definition).expect_err("invalid registration cannot serialize");
+        assert_eq!(error.diagnostics(), report.diagnostics.as_slice());
+    }
+
+    #[test]
+    fn incomplete_triggers_and_repetition_are_diagnosed_at_their_index() {
+        for trigger in [
+            "<CalendarTrigger><ScheduleByDay><DaysInterval>0</DaysInterval></ScheduleByDay></CalendarTrigger>",
+            "<CalendarTrigger><ScheduleByWeek><WeeksInterval>0</WeeksInterval><DaysOfWeek/></ScheduleByWeek></CalendarTrigger>",
+            "<CalendarTrigger><ScheduleByMonth><DaysOfMonth><Day>0</Day></DaysOfMonth><Months><January/></Months></ScheduleByMonth></CalendarTrigger>",
+            "<CalendarTrigger><ScheduleByMonthDayOfWeek><Weeks/><DaysOfWeek><Monday/></DaysOfWeek><Months><January/></Months></ScheduleByMonthDayOfWeek></CalendarTrigger>",
+            "<EventTrigger><Subscription/></EventTrigger>",
+            "<TimeTrigger><Repetition><Interval>PT0S</Interval></Repetition></TimeTrigger>",
+        ] {
+            let xml = format!(
+                "<Task><Triggers>{trigger}</Triggers><Actions><Exec><Command>fixture.exe</Command></Exec></Actions></Task>"
+            );
+            let definition =
+                crate::xml::from_bytes(xml.as_bytes()).expect("parse invalid semantic fixture");
+            let report = definition.validate();
+            assert!(!report.is_valid(), "trigger {trigger}");
+            assert!(
+                report
+                    .errors()
+                    .any(|diagnostic| diagnostic.path.starts_with("triggers[0]"))
+            );
+        }
+    }
 
     #[test]
     fn reports_missing_action() {

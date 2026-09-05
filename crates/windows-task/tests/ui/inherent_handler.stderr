@@ -1,0 +1,5 @@
+error: handler must mark a TaskHandler trait implementation
+ --> tests/ui/inherent_handler.rs:3:6
+  |
+3 | impl Invalid {}
+  |      ^^^^^^^

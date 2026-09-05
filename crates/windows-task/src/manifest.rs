@@ -87,7 +87,7 @@ pub struct ManagedTask {
 pub struct TaskManifest {
     /// Must equal [`FORMAT_VERSION`].
     pub format_version: u32,
-    /// Stable owner UUID encoded into managed task registration URIs.
+    /// Stable owner UUID encoded into managed task registration Source markers.
     pub owner: Uuid,
     /// Human-readable owner or application name.
     pub owner_name: String,
@@ -126,12 +126,33 @@ impl TaskManifest {
         let text = std::str::from_utf8(bytes)
             .map_err(|error| serialization_error(format!("manifest is not UTF-8: {error}")))?;
         let manifest = match format {
-            DocumentFormat::Toml => toml::from_str(text)
-                .map_err(|error| serialization_error(format!("TOML: {error}")))?,
-            DocumentFormat::Json => serde_json::from_str(text)
-                .map_err(|error| serialization_error(format!("JSON: {error}")))?,
-            DocumentFormat::Yaml => serde_saphyr::from_str(text)
-                .map_err(|error| serialization_error(format!("YAML: {error}")))?,
+            DocumentFormat::Toml => toml::from_str(text).map_err(|error: toml::de::Error| {
+                serialization_error("invalid TOML manifest syntax or field type").with_context(
+                    "byte_offset",
+                    error
+                        .span()
+                        .map_or_else(|| "unknown".into(), |span| span.start.to_string()),
+                )
+            })?,
+            DocumentFormat::Json => {
+                serde_json::from_str(text).map_err(|error: serde_json::Error| {
+                    serialization_error("invalid JSON manifest syntax or field type")
+                        .with_context("line", error.line().to_string())
+                        .with_context("column", error.column().to_string())
+                })?
+            }
+            DocumentFormat::Yaml => {
+                serde_saphyr::from_str(text).map_err(|error: serde_saphyr::Error| {
+                    let mut result =
+                        serialization_error("invalid YAML manifest syntax or field type");
+                    if let Some(location) = error.location() {
+                        result = result
+                            .with_context("line", location.line().to_string())
+                            .with_context("column", location.column().to_string());
+                    }
+                    result
+                })?
+            }
         };
         Ok(manifest)
     }
@@ -143,8 +164,17 @@ impl TaskManifest {
                 .map_err(|error| serialization_error(format!("TOML: {error}"))),
             DocumentFormat::Json => serde_json::to_string_pretty(self)
                 .map_err(|error| serialization_error(format!("JSON: {error}"))),
-            DocumentFormat::Yaml => serde_saphyr::to_string(self)
-                .map_err(|error| serialization_error(format!("YAML: {error}"))),
+            DocumentFormat::Yaml => {
+                // The MSRV-compatible saphyr serializer emits ambiguous plain
+                // scalars (for example `owner_name: value:`). Use the same data
+                // model as JSON, with block containers and JSON-quoted scalars,
+                // a YAML 1.2 subset that never guesses whether text is a token.
+                let value = serde_json::to_value(self)
+                    .map_err(|_| serialization_error("cannot encode YAML manifest values"))?;
+                let mut output = String::new();
+                write_yaml_value(&value, 0, &mut output);
+                Ok(output)
+            }
         }
     }
 
@@ -161,7 +191,9 @@ impl TaskManifest {
                     "manifest version {} is unsupported; expected {FORMAT_VERSION}",
                     self.format_version
                 ),
-                remediation: None,
+                remediation: Some(format!(
+                    "Use format_version = {FORMAT_VERSION} and migrate unsupported fields."
+                )),
             });
         }
         if self.namespace.is_root() {
@@ -234,7 +266,7 @@ fn outside_namespace(path: String) -> Diagnostic {
         code: DiagnosticCode::OwnershipConflict,
         path,
         message: "path is outside the managed namespace".into(),
-        remediation: None,
+        remediation: Some("Move the path under this manifest's namespace.".into()),
     }
 }
 
@@ -244,7 +276,7 @@ fn duplicate_path(path: String) -> Diagnostic {
         code: DiagnosticCode::DuplicateId,
         path,
         message: "path appears more than once".into(),
-        remediation: None,
+        remediation: Some("Remove the duplicate entry or use a distinct path.".into()),
     }
 }
 
@@ -263,8 +295,52 @@ fn percent_encode(value: &str) -> String {
     encoded
 }
 
+fn write_yaml_value(value: &serde_json::Value, indent: usize, output: &mut String) {
+    match value {
+        serde_json::Value::Object(fields) if !fields.is_empty() => {
+            for (key, value) in fields {
+                let key = serde_json::Value::String(key.clone()).to_string();
+                write_yaml_entry(&format!("{key}:"), value, indent, output);
+            }
+        }
+        serde_json::Value::Array(items) if !items.is_empty() => {
+            for value in items {
+                write_yaml_entry("-", value, indent, output);
+            }
+        }
+        _ => {
+            output.push_str(&value.to_string());
+            output.push('\n');
+        }
+    }
+}
+
+fn write_yaml_entry(prefix: &str, value: &serde_json::Value, indent: usize, output: &mut String) {
+    output.push_str(&" ".repeat(indent));
+    output.push_str(prefix);
+    let container = match value {
+        serde_json::Value::Object(fields) => !fields.is_empty(),
+        serde_json::Value::Array(items) => !items.is_empty(),
+        _ => false,
+    };
+    output.push(if container { '\n' } else { ' ' });
+    write_yaml_value(value, indent + 2, output);
+}
+
 fn serialization_error(message: impl Into<String>) -> Error {
-    Error::new(ErrorKind::Serialization, message)
+    let message = message.into();
+    Error::new(ErrorKind::Serialization, message.clone()).with_validation(ValidationReport {
+        diagnostics: vec![Diagnostic {
+            level: DiagnosticLevel::Error,
+            code: DiagnosticCode::Other("manifest_syntax".into()),
+            path: "$".into(),
+            message,
+            remediation: Some(
+                "Check the format, reported location, field types and the 8 MiB input limit."
+                    .into(),
+            ),
+        }],
+    })
 }
 
 #[cfg(test)]
@@ -275,6 +351,77 @@ mod tests {
 
     use super::{DocumentFormat, TaskManifest};
     use crate::FolderPath;
+
+    #[test]
+    fn yaml_preserves_every_control_scalar_and_unicode_line_separator() {
+        for code in (0..=0x9f).chain([0x2028, 0x2029, 0xfeff]) {
+            let character = char::from_u32(code).expect("valid scalar fixture");
+            let value = format!("before{character}after");
+            let manifest =
+                TaskManifest::new(Uuid::nil(), value, "\\Tests".parse().expect("namespace"));
+            let output = manifest
+                .to_string(DocumentFormat::Yaml)
+                .expect("YAML output");
+            let actual = TaskManifest::from_slice(output.as_bytes(), DocumentFormat::Yaml)
+                .expect("YAML input");
+            assert_eq!(actual, manifest, "Unicode scalar U+{code:04X}");
+        }
+    }
+
+    #[test]
+    fn yaml_quotes_ambiguous_scalars_and_preserves_nested_manifest_values() {
+        use crate::{
+            manifest::ManagedTask,
+            model::{Action, ExecAction, TaskDefinition},
+        };
+        for value in [
+            "fuz:",
+            "true",
+            "null",
+            "007",
+            "trailing ",
+            " leading",
+            "line\nnext\r\n",
+            "\u{1b}\0\t",
+            "日本語:#[]{}",
+            "a\u{feff}b",
+        ] {
+            let mut manifest =
+                TaskManifest::new(Uuid::nil(), value, "\\Tests".parse().expect("namespace"));
+            let mut definition =
+                TaskDefinition::new(Action::Exec(ExecAction::new("fixture.exe").args([value])));
+            definition.registration.description = Some(value.into());
+            manifest.tasks.push(ManagedTask {
+                path: manifest.namespace.task("Task").expect("path"),
+                definition,
+                credentials: Default::default(),
+            });
+            let output = manifest
+                .to_string(DocumentFormat::Yaml)
+                .expect("serialize YAML");
+            assert_eq!(
+                TaskManifest::from_slice(output.as_bytes(), DocumentFormat::Yaml)
+                    .expect("read emitted YAML"),
+                manifest
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_documents_never_echo_input_in_serialized_errors() {
+        for (format, input) in [
+            (DocumentFormat::Toml, "owner = SENTINEL_SECRET"),
+            (DocumentFormat::Json, "\"SENTINEL_SECRET\""),
+            (DocumentFormat::Yaml, "owner: [SENTINEL_SECRET"),
+        ] {
+            let error =
+                TaskManifest::from_slice(input.as_bytes(), format).expect_err("invalid manifest");
+            let serialized = serde_json::to_string(&error).expect("structured error");
+            assert!(!serialized.contains("SENTINEL"));
+            assert!(serialized.contains("manifest_syntax"));
+            assert!(serialized.contains("byte_offset") || serialized.contains("line"));
+        }
+    }
 
     #[test]
     fn empty_manifest_round_trips_all_formats() {

@@ -9,8 +9,12 @@
 
 ## Verification
 
-- [ ] `just lint`
-- [ ] `just test`
+- [ ] `cargo xtask ci` (attach verification run ID)
+- [ ] Reproducer and failure/response-loss cases exercise production logic
+- [ ] Trace context and secret redaction verified
+- [ ] Partial mutation, compensation and unconfirmed state verified
+- [ ] Native execution versus compilation-only results distinguished
+- [ ] Public API examples and migration notes updated
 
 ## ADR
 

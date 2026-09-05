@@ -1,0 +1,102 @@
+---
+name: extended-verification
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "crates/**/Cargo.toml"
+      - "fixtures/native/**"
+      - "fuzz/**"
+      - "crates/windows-task/src/**"
+      - "scripts/verify-native-resources.ps1"
+      - ".github/workflows/extended-verification.yml"
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: extended-verification-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  native-resources:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.85.0 --profile minimal
+      - name: Repeated native connection and cleanup measurements
+        shell: pwsh
+        run: ./scripts/verify-native-resources.ps1
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: native-resource-measurements
+          path: target/verification/
+
+  fuzz:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install nightly --profile minimal
+      - run: cargo +nightly install cargo-fuzz --locked
+      - run: |
+          mkdir -p fuzz/corpus/input_boundaries
+          cp fuzz/seeds/* fuzz/corpus/input_boundaries/
+          cargo +nightly fuzz run input_boundaries -- -max_total_time=1200 -seed=20260905 2>&1 | tee fuzz/run.log
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: fuzz-reproducers
+          path: |
+            fuzz/artifacts/
+            fuzz/corpus/
+            fuzz/run.log
+
+  miri:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install nightly --profile minimal --component miri
+      - run: cargo +nightly miri test -p windows-task --no-default-features --lib 2>&1 | tee miri.log
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: miri-results
+          path: miri.log
+
+  mutations:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - run: rustup toolchain install 1.85.0 --profile minimal
+      - run: cargo +stable install cargo-mutants --locked
+      - run: >-
+          cargo +1.85.0 mutants -p windows-task --timeout 120 --gitignore true
+          --file 'crates/windows-task/src/reconcile.rs'
+          --file 'crates/windows-task/src/reconcile/**/*.rs'
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: mutation-results
+          path: mutants.out/

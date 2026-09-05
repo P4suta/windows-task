@@ -2,8 +2,9 @@
 
 use std::{
     fmt,
-    sync::{Arc, mpsc},
+    sync::{Arc, Mutex, mpsc},
     thread,
+    time::{Duration, Instant},
 };
 
 #[cfg(feature = "async")]
@@ -23,7 +24,7 @@ use std::sync::atomic::Ordering;
 use std::sync::atomic::AtomicU8;
 
 #[cfg(feature = "history")]
-use std::time::{Duration, Instant, SystemTime};
+use std::time::SystemTime;
 
 #[cfg(windows)]
 use std::str::FromStr;
@@ -49,7 +50,9 @@ mod sys_portable;
 #[cfg(not(windows))]
 use sys_portable as sys;
 
-type Job = Box<dyn FnOnce(&mut sys::Session) + Send + 'static>;
+type Job<S = sys::Session> = Box<dyn FnOnce(&mut S) + Send + 'static>;
+#[cfg(feature = "history")]
+mod watch;
 
 /// Process-wide COM behavior. `windows-task` never silently initializes COM
 /// security because another library may already own that decision.
@@ -71,6 +74,25 @@ pub struct SchedulerBuilder {
 }
 
 impl SchedulerBuilder {
+    /// Diagnoses connection failure as well as checks available after connecting.
+    /// This never registers tasks or changes Event Log configuration.
+    pub fn diagnose(self) -> DiagnosticReport {
+        let target = self.target.clone();
+        match self.connect_blocking().and_then(|scheduler| scheduler.blocking().doctor()) {
+            Ok(report) => report,
+            Err(error) => DiagnosticReport { target, diagnostics: vec![crate::Diagnostic {
+                level: crate::DiagnosticLevel::Error,
+                code: match error.kind() {
+                    ErrorKind::AccessDenied => crate::DiagnosticCode::InsufficientRights,
+                    ErrorKind::UnsupportedPlatform => crate::DiagnosticCode::UnsupportedCapability,
+                    _ => crate::DiagnosticCode::RemoteConnectivity,
+                },
+                path: error.operation().unwrap_or("scheduler.connect").into(),
+                message: format!("{:?}; native code: {:?}", error.kind(), error.native_code()),
+                remediation: Some("Check the Schedule service, connection identity, RPC/DCOM reachability and read permissions. Write permissions have not been tested.".into()),
+            }] },
+        }
+    }
     /// Targets the local scheduler using the current token.
     #[must_use]
     pub fn local(mut self) -> Self {
@@ -110,10 +132,33 @@ impl SchedulerBuilder {
     #[cfg(feature = "async")]
     pub fn connect_async(self) -> ConnectFuture {
         let (sender, receiver) = futures_channel::oneshot::channel();
-        thread::spawn(move || {
-            drop(sender.send(Scheduler::connect(self)));
-        });
-        ConnectFuture { receiver }
+        let trace = crate::observe::Operation::new("connect_async");
+        let worker_trace = trace.clone();
+        let state = Arc::new(AtomicU8::new(OPERATION_QUEUED));
+        let worker_state = Arc::clone(&state);
+        let spawned = thread::Builder::new()
+            .name("windows-task-connect".into())
+            .spawn(move || {
+                drop(sender.send(worker_trace.run(|| {
+                    if !begin_operation(&worker_state) {
+                        return Err(Error::new(
+                            ErrorKind::Cancelled,
+                            "connection was cancelled before it started",
+                        ));
+                    }
+                    Scheduler::connect(self)
+                })));
+            });
+        if spawned.is_err() {
+            // The moved sender is released on failed thread creation. Polling
+            // observes WorkerStopped instead of panicking in thread::spawn.
+            drop(trace.run(|| Err::<(), _>(worker_stopped())));
+        }
+        ConnectFuture {
+            receiver,
+            trace,
+            state,
+        }
     }
 }
 
@@ -132,6 +177,7 @@ impl Scheduler {
     }
 
     fn connect(builder: SchedulerBuilder) -> Result<Self> {
+        let trace = crate::observe::Operation::new("connect");
         let target = builder.target.clone();
         let input = sys::ConnectionInput {
             target: builder.target,
@@ -142,7 +188,7 @@ impl Scheduler {
         let (init_sender, init_receiver) = mpsc::sync_channel(1);
         let join = thread::Builder::new()
             .name("windows-task-com".into())
-            .spawn(move || match sys::Session::connect(input) {
+            .spawn(move || match trace.run(|| sys::Session::connect(input)) {
                 Ok(mut session) => {
                     let info = session.connection_info();
                     drop(init_sender.send(info));
@@ -169,8 +215,8 @@ impl Scheduler {
         })??;
         Ok(Self {
             worker: Arc::new(Worker {
-                sender: Some(sender),
-                join: Some(join),
+                sender: Mutex::new(Some(sender)),
+                join: Mutex::new(Some(join)),
             }),
             connection,
         })
@@ -180,6 +226,13 @@ impl Scheduler {
     #[must_use]
     pub const fn connection_info(&self) -> &ConnectionInfo {
         &self.connection
+    }
+
+    /// Closes this shared session to new work and waits up to `timeout` for
+    /// queued work and COM cleanup. All clones become closed. A timeout does
+    /// not abort an in-flight RPC; this method may be called again to wait.
+    pub fn shutdown(&self, timeout: Duration) -> Result<()> {
+        self.worker.shutdown(timeout)
     }
 
     /// Creates the blocking API view.
@@ -196,6 +249,37 @@ impl Scheduler {
     }
 }
 
+impl<S> Worker<S> {
+    fn shutdown(&self, timeout: Duration) -> Result<()> {
+        self.sender
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        let started = Instant::now();
+        loop {
+            {
+                let mut join = self
+                    .join
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                if join.as_ref().is_none_or(thread::JoinHandle::is_finished) {
+                    return join
+                        .take()
+                        .map_or(Ok(()), |join| join.join().map_err(|_| worker_stopped()));
+                }
+            }
+            if started.elapsed() >= timeout {
+                return Err(Error::new(
+                    ErrorKind::Timeout,
+                    "COM worker shutdown is not yet confirmed",
+                )
+                .with_operation("shutdown"));
+            }
+            thread::sleep(Duration::from_millis(5).min(timeout.saturating_sub(started.elapsed())));
+        }
+    }
+}
+
 impl fmt::Debug for Scheduler {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -205,57 +289,58 @@ impl fmt::Debug for Scheduler {
     }
 }
 
-struct Worker {
-    sender: Option<mpsc::Sender<Job>>,
-    join: Option<thread::JoinHandle<()>>,
+struct Worker<S = sys::Session> {
+    sender: Mutex<Option<mpsc::Sender<Job<S>>>>,
+    join: Mutex<Option<thread::JoinHandle<()>>>,
 }
 
-impl Worker {
-    fn call<T, F>(&self, operation: F) -> Result<T>
+impl<S: 'static> Worker<S> {
+    fn call<T, F>(&self, name: &'static str, operation: F) -> Result<T>
     where
         T: Send + 'static,
-        F: FnOnce(&mut sys::Session) -> Result<T> + Send + 'static,
+        F: FnOnce(&mut S) -> Result<T> + Send + 'static,
     {
         let (sender, receiver) = mpsc::sync_channel(1);
+        let trace = crate::observe::Operation::new(name);
         self.sender
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .ok_or_else(worker_stopped)?
             .send(Box::new(move |session| {
-                drop(sender.send(operation(session)));
+                drop(sender.send(trace.run(|| operation(session))));
             }))
             .map_err(|_| worker_stopped())?;
         receiver.recv().map_err(|_| worker_stopped())?
     }
 
     #[cfg(feature = "async")]
-    fn call_async<T, F>(&self, operation: F) -> OperationFuture<T>
+    fn call_async<T, F>(&self, name: &'static str, operation: F) -> OperationFuture<T>
     where
         T: Send + 'static,
-        F: FnOnce(&mut sys::Session) -> Result<T> + Send + 'static,
+        F: FnOnce(&mut S) -> Result<T> + Send + 'static,
     {
         let (sender, receiver) = futures_channel::oneshot::channel();
         let state = Arc::new(AtomicU8::new(OPERATION_QUEUED));
         let job_state = Arc::clone(&state);
-        let job = Box::new(move |session: &mut sys::Session| {
-            if job_state
-                .compare_exchange(
-                    OPERATION_QUEUED,
-                    OPERATION_STARTED,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                )
-                .is_err()
-            {
-                drop(sender.send(Err(Error::new(
-                    ErrorKind::Cancelled,
-                    "operation was cancelled before it started",
-                ))));
+        let trace = crate::observe::Operation::new(name);
+        let response_trace = trace.clone();
+        let job = Box::new(move |session: &mut S| {
+            if !begin_operation(&job_state) {
+                drop(sender.send(trace.run(|| {
+                    Err(Error::new(
+                        ErrorKind::Cancelled,
+                        "operation was cancelled before it started",
+                    ))
+                })));
                 return;
             }
-            drop(sender.send(operation(session)));
+            drop(sender.send(trace.run(|| operation(session))));
         });
         let queued = self
             .sender
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .as_ref()
             .ok_or_else(worker_stopped)
             .and_then(|queue| queue.send(job).map_err(|_| worker_stopped()));
@@ -264,16 +349,23 @@ impl Worker {
             receiver,
             immediate: queued.err(),
             state,
+            trace: response_trace,
         }
     }
 }
 
-impl Drop for Worker {
+impl<S> Drop for Worker<S> {
     fn drop(&mut self) {
-        self.sender.take();
-        if let Some(join) = self.join.take() {
-            drop(join.join());
-        }
+        self.sender
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        // Dropping JoinHandle detaches. The worker retains apartment ownership
+        // until the current RPC and queued work finish.
+        self.join
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
     }
 }
 
@@ -289,6 +381,15 @@ fn worker_stopped() -> Error {
 #[derive(Debug)]
 pub struct ConnectFuture {
     receiver: futures_channel::oneshot::Receiver<Result<Scheduler>>,
+    trace: crate::observe::Operation,
+    state: Arc<AtomicU8>,
+}
+
+#[cfg(feature = "async")]
+impl Drop for ConnectFuture {
+    fn drop(&mut self) {
+        cancel_operation(&self.state);
+    }
 }
 
 #[cfg(feature = "async")]
@@ -296,9 +397,12 @@ impl Future for ConnectFuture {
     type Output = Result<Scheduler>;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        Pin::new(&mut self.receiver)
-            .poll(context)
-            .map(|result| result.unwrap_or_else(|_| Err(worker_stopped())))
+        let trace = self.trace.clone();
+        trace.scope(|| {
+            Pin::new(&mut self.receiver)
+                .poll(context)
+                .map(|result| result.unwrap_or_else(|_| Err(worker_stopped())))
+        })
     }
 }
 
@@ -309,6 +413,7 @@ pub struct OperationFuture<T> {
     receiver: Option<futures_channel::oneshot::Receiver<Result<T>>>,
     immediate: Option<Error>,
     state: Arc<AtomicU8>,
+    trace: crate::observe::Operation,
 }
 
 #[cfg(feature = "async")]
@@ -317,6 +422,30 @@ const OPERATION_QUEUED: u8 = 0;
 const OPERATION_STARTED: u8 = 1;
 #[cfg(feature = "async")]
 const OPERATION_CANCELLED: u8 = 2;
+
+#[cfg(feature = "async")]
+fn begin_operation(state: &AtomicU8) -> bool {
+    state
+        .compare_exchange(
+            OPERATION_QUEUED,
+            OPERATION_STARTED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .is_ok()
+}
+
+#[cfg(feature = "async")]
+fn cancel_operation(state: &AtomicU8) {
+    state
+        .compare_exchange(
+            OPERATION_QUEUED,
+            OPERATION_CANCELLED,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        )
+        .unwrap_or(OPERATION_CANCELLED);
+}
 
 #[cfg(feature = "async")]
 impl<T> OperationFuture<T> {
@@ -333,27 +462,23 @@ impl<T> Future for OperationFuture<T> {
     type Output = Result<T>;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Some(error) = self.immediate.take() {
-            return Poll::Ready(Err(error));
-        }
-        let receiver = self.receiver.as_mut().expect("receiver or immediate error");
-        Pin::new(receiver)
-            .poll(context)
-            .map(|result| result.unwrap_or_else(|_| Err(worker_stopped())))
+        let trace = self.trace.clone();
+        trace.scope(|| {
+            if let Some(error) = self.immediate.take() {
+                return Poll::Ready(Err(error));
+            }
+            let receiver = self.receiver.as_mut().expect("receiver or immediate error");
+            Pin::new(receiver)
+                .poll(context)
+                .map(|result| result.unwrap_or_else(|_| Err(worker_stopped())))
+        })
     }
 }
 
 #[cfg(feature = "async")]
 impl<T> Drop for OperationFuture<T> {
     fn drop(&mut self) {
-        self.state
-            .compare_exchange(
-                OPERATION_QUEUED,
-                OPERATION_CANCELLED,
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .unwrap_or(OPERATION_CANCELLED);
+        cancel_operation(&self.state);
     }
 }
 
@@ -364,6 +489,7 @@ pub struct WaitFuture {
     receiver: Option<futures_channel::oneshot::Receiver<Result<RunOutcome>>>,
     immediate: Option<Error>,
     cancelled: Arc<AtomicBool>,
+    trace: crate::observe::Operation,
 }
 
 #[cfg(all(feature = "async", feature = "history"))]
@@ -371,13 +497,16 @@ impl Future for WaitFuture {
     type Output = Result<RunOutcome>;
 
     fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
-        if let Some(error) = self.immediate.take() {
-            return Poll::Ready(Err(error));
-        }
-        let receiver = self.receiver.as_mut().expect("receiver or immediate error");
-        Pin::new(receiver)
-            .poll(context)
-            .map(|result| result.unwrap_or_else(|_| Err(worker_stopped())))
+        let trace = self.trace.clone();
+        trace.scope(|| {
+            if let Some(error) = self.immediate.take() {
+                return Poll::Ready(Err(error));
+            }
+            let receiver = self.receiver.as_mut().expect("receiver or immediate error");
+            Pin::new(receiver)
+                .poll(context)
+                .map(|result| result.unwrap_or_else(|_| Err(worker_stopped())))
+        })
     }
 }
 
@@ -521,6 +650,83 @@ pub struct RunHandle {
     pub engine_process_id: Option<u32>,
 }
 
+// A collection is a snapshot: an instance may finish before any subsequent
+// property read. Only the precise Task Scheduler disappearance code is benign;
+// permission, transport and malformed-property failures must remain visible.
+#[cfg(any(windows, test))]
+fn collect_running_snapshots<T>(items: impl Iterator<Item = Result<T>>) -> Result<Vec<T>> {
+    items
+        .filter_map(|item| match item {
+            Err(error)
+                if error.native_code()
+                    == Some(i32::from_ne_bytes(0x8004_130B_u32.to_ne_bytes())) =>
+            {
+                None
+            }
+            other => Some(other),
+        })
+        .collect()
+}
+
+#[cfg(any(windows, test))]
+fn security_write_required(
+    current: Result<SecurityDescriptor>,
+    desired: &SecurityDescriptor,
+) -> Result<bool> {
+    match current {
+        Ok(current) => Ok(!current.access_equivalent(desired)),
+        Err(error) if error.kind() == ErrorKind::AccessDenied => {
+            // WRITE_DAC does not imply READ_CONTROL. The direct setter remains
+            // usable without read permission; reconcile separately requires its
+            // ownership/precondition/backup reads before calling any setter.
+            #[cfg(feature = "tracing")]
+            tracing::debug!(
+                phase = "security_read_unavailable",
+                error_kind = "access_denied"
+            );
+            Ok(true)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+#[test]
+fn acl_write_permission_does_not_require_read_permission() {
+    let desired = SecurityDescriptor::from_sddl("D:P(A;;FA;;;SY)").expect("desired DACL");
+    assert!(!security_write_required(Ok(desired.clone()), &desired).expect("equal descriptor"));
+    let changed = SecurityDescriptor::from_sddl("D:P(A;;FR;;;SY)").expect("different rights");
+    assert!(security_write_required(Ok(changed), &desired).expect("different descriptor"));
+    assert!(
+        security_write_required(
+            Err(Error::new(ErrorKind::AccessDenied, "READ_CONTROL denied")),
+            &desired
+        )
+        .expect("WRITE_DAC may still be available")
+    );
+    let error = security_write_required(
+        Err(Error::new(ErrorKind::Com, "transport failed")),
+        &desired,
+    )
+    .expect_err("transport failure stays visible");
+    assert_eq!(error.kind(), ErrorKind::Com);
+}
+
+#[test]
+fn running_snapshot_disappearance_does_not_hide_other_failures() {
+    let gone = Error::new(ErrorKind::Com, "instance ended")
+        .with_native_code(i32::from_ne_bytes(0x8004_130B_u32.to_ne_bytes()));
+    assert_eq!(
+        collect_running_snapshots([Ok(1), Err(gone), Ok(2)].into_iter())
+            .expect("remaining snapshots"),
+        vec![1, 2]
+    );
+    for kind in [ErrorKind::AccessDenied, ErrorKind::Com, ErrorKind::NotFound] {
+        let result =
+            collect_running_snapshots([Ok(1), Err(Error::new(kind, "probe failed"))].into_iter());
+        assert_eq!(result.expect_err("unrelated failure retained").kind(), kind);
+    }
+}
+
 /// Polling and correlation policy for [`BlockingScheduler::wait_for_run`].
 #[cfg(feature = "history")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -542,7 +748,7 @@ impl Default for WaitOptions {
             timeout: Duration::from_secs(5 * 60),
             poll_interval: Duration::from_millis(250),
             history_grace: Duration::from_secs(2),
-            allow_polling_fallback: true,
+            allow_polling_fallback: false,
         }
     }
 }
@@ -566,6 +772,30 @@ impl Iterator for HistoryWatcher {
 }
 
 #[cfg(feature = "history")]
+impl HistoryWatcher {
+    /// Requests cancellation and waits for the helper to exit. A timeout does
+    /// not cancel an in-flight native RPC. Buffered events remain readable.
+    pub fn shutdown(&mut self, timeout: Duration) -> Result<()> {
+        if let Some(stop) = self.stop.take() {
+            if stop.send(()).is_err() { /* helper already exited */ }
+        }
+        let started = Instant::now();
+        while self.join.as_ref().is_some_and(|join| !join.is_finished()) {
+            if started.elapsed() >= timeout {
+                return Err(Error::new(
+                    ErrorKind::Timeout,
+                    "history watcher shutdown is not confirmed",
+                ));
+            }
+            thread::sleep(Duration::from_millis(5).min(timeout.saturating_sub(started.elapsed())));
+        }
+        self.join
+            .take()
+            .map_or(Ok(()), |join| join.join().map_err(|_| worker_stopped()))
+    }
+}
+
+#[cfg(feature = "history")]
 impl Drop for HistoryWatcher {
     fn drop(&mut self) {
         if let Some(stop) = self.stop.take() {
@@ -573,9 +803,7 @@ impl Drop for HistoryWatcher {
                 // The worker already stopped, which is the requested state.
             }
         }
-        if let Some(join) = self.join.take() {
-            drop(join.join());
-        }
+        self.join.take();
     }
 }
 
@@ -665,20 +893,71 @@ bitflags::bitflags! {
 pub struct BlockingScheduler(Scheduler);
 
 impl BlockingScheduler {
+    #[cfg(feature = "reconcile")]
+    pub(crate) fn normalize_definition(
+        &self,
+        definition: TaskDefinition,
+    ) -> Result<TaskDefinition> {
+        self.0.worker.call("normalize_definition", move |session| {
+            session.normalize_definition(definition)
+        })
+    }
+
+    #[cfg(feature = "reconcile")]
+    pub(crate) fn normalize_security(
+        &self,
+        descriptor: SecurityDescriptor,
+        information: SecurityInformation,
+    ) -> Result<SecurityDescriptor> {
+        self.0.worker.call("normalize_security", move |session| {
+            session.normalize_security(descriptor, information)
+        })
+    }
+
+    #[cfg(feature = "reconcile")]
+    pub(crate) fn register_commit(
+        &self,
+        path: &TaskPath,
+        definition: &TaskDefinition,
+        options: RegistrationOptions,
+    ) -> Result<()> {
+        let logon = definition.principal.logon_type;
+        let xml = RawTaskXml::new(crate::xml::to_string(definition)?.into_bytes())?;
+        self.register_raw_commit(path, xml, logon, options)
+    }
+
+    #[cfg(feature = "reconcile")]
+    pub(crate) fn register_raw_commit(
+        &self,
+        path: &TaskPath,
+        xml: RawTaskXml,
+        logon: LogonType,
+        options: RegistrationOptions,
+    ) -> Result<()> {
+        let path = path.clone();
+        self.0.worker.call("register.commit", move |session| {
+            session.register_raw_commit(path, xml, logon, options)
+        })
+    }
+
     /// Returns target capabilities.
     pub fn capabilities(&self) -> Result<Capabilities> {
-        self.0.worker.call(sys::Session::capabilities)
+        self.0
+            .worker
+            .call("capabilities", sys::Session::capabilities)
     }
 
     /// Runs read-only connectivity, rights, schema, and history checks.
     pub fn doctor(&self) -> Result<DiagnosticReport> {
-        self.0.worker.call(sys::Session::doctor)
+        self.0.worker.call("doctor", sys::Session::doctor)
     }
 
     /// Queries the Task Scheduler Operational event channel.
     #[cfg(feature = "history")]
     pub fn history(&self, query: HistoryQuery) -> Result<Vec<HistoryEvent>> {
-        self.0.worker.call(move |session| session.history(query))
+        self.0
+            .worker
+            .call("history", move |session| session.history(query))
     }
 
     /// Explicitly enables or disables the Task Scheduler Operational channel.
@@ -686,9 +965,17 @@ impl BlockingScheduler {
     /// connecting or querying.
     #[cfg(feature = "history")]
     pub fn set_history_enabled(&self, enabled: bool) -> Result<()> {
+        self.0.worker.call("set_history_enabled", move |session| {
+            session.set_history_enabled(enabled)
+        })
+    }
+
+    /// Reads the channel configuration without changing it or probing write rights.
+    #[cfg(feature = "history")]
+    pub fn history_enabled(&self) -> Result<bool> {
         self.0
             .worker
-            .call(move |session| session.set_history_enabled(enabled))
+            .call("history_enabled", sys::Session::history_enabled)
     }
 
     /// Waits for one run, preferring exact instance-GUID Event Log
@@ -701,6 +988,8 @@ impl BlockingScheduler {
     /// Watches new history records by polling the channel on a helper thread.
     /// If `query.since` is omitted, the watch begins at the call time instead
     /// of replaying the entire log.
+    /// Watching always reads forward in bounded pages. `query.forward` and
+    /// `query.limit` apply only to one-shot queries and are ignored here.
     #[cfg(feature = "history")]
     pub fn watch_history(
         &self,
@@ -713,44 +1002,30 @@ impl BlockingScheduler {
                 "history watch poll interval must be non-zero",
             ));
         }
-        query.forward = false;
+        query.forward = true;
         if query.since.is_none() {
             query.since = Some(SystemTime::now());
         }
         let scheduler = self.clone();
-        let (event_sender, receiver) = mpsc::channel();
+        let (event_sender, receiver) = mpsc::sync_channel(256);
         let (stop, stop_receiver) = mpsc::channel();
+        let trace = crate::observe::Operation::new("watch_history");
         let join = thread::Builder::new()
             .name("windows-task-history".into())
             .spawn(move || {
-                let mut last_record_id = 0_u64;
-                loop {
-                    if stop_receiver.try_recv().is_ok() {
-                        break;
-                    }
-                    match scheduler.history(query.clone()) {
-                        Ok(mut events) => {
-                            events.sort_by_key(|event| event.record_id);
-                            for event in events {
-                                if event.record_id <= last_record_id {
-                                    continue;
-                                }
-                                last_record_id = event.record_id;
-                                if event_sender.send(Ok(event)).is_err() {
-                                    return;
-                                }
-                            }
-                        }
-                        Err(error) => {
-                            drop(event_sender.send(Err(error)));
-                            return;
-                        }
-                    }
-                    match stop_receiver.recv_timeout(poll_interval) {
-                        Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                        Err(mpsc::RecvTimeoutError::Timeout) => {}
-                    }
-                }
+                trace.scope(|| {
+                    watch::deliver(
+                        |cursor| {
+                            let query = query.clone();
+                            scheduler.0.worker.call("history.page", move |session| {
+                                session.history_page(query, cursor)
+                            })
+                        },
+                        &event_sender,
+                        &stop_receiver,
+                        poll_interval,
+                    )
+                });
             })
             .map_err(|error| {
                 Error::new(
@@ -769,13 +1044,15 @@ impl BlockingScheduler {
     pub fn validate(&self, definition: TaskDefinition) -> Result<ValidationReport> {
         self.0
             .worker
-            .call(move |session| session.validate(definition))
+            .call("validate", move |session| session.validate(definition))
     }
 
     /// Gets one registered task and its original XML.
     pub fn get_task(&self, path: &TaskPath) -> Result<RegisteredTask> {
         let path = path.clone();
-        self.0.worker.call(move |session| session.get_task(path))
+        self.0
+            .worker
+            .call("get_task", move |session| session.get_task(path))
     }
 
     /// Enumerates tasks beneath a folder.
@@ -785,9 +1062,9 @@ impl BlockingScheduler {
         options: ListOptions,
     ) -> Result<Vec<RegisteredTask>> {
         let folder = folder.clone();
-        self.0
-            .worker
-            .call(move |session| session.list_tasks(folder, options))
+        self.0.worker.call("list_tasks", move |session| {
+            session.list_tasks(folder, options)
+        })
     }
 
     /// Registers canonical XML generated from a typed definition.
@@ -798,9 +1075,9 @@ impl BlockingScheduler {
         options: RegistrationOptions,
     ) -> Result<RegisteredTask> {
         let path = path.clone();
-        self.0
-            .worker
-            .call(move |session| session.register(path, definition, options))
+        self.0.worker.call("register", move |session| {
+            session.register(path, definition, options)
+        })
     }
 
     /// Registers already validated raw Task XML.
@@ -812,23 +1089,25 @@ impl BlockingScheduler {
         options: RegistrationOptions,
     ) -> Result<RegisteredTask> {
         let path = path.clone();
-        self.0
-            .worker
-            .call(move |session| session.register_raw(path, xml, logon_type, options))
+        self.0.worker.call("register_raw", move |session| {
+            session.register_raw(path, xml, logon_type, options)
+        })
     }
 
     /// Deletes a task. Running instances are not stopped implicitly.
     pub fn delete_task(&self, path: &TaskPath) -> Result<()> {
         let path = path.clone();
-        self.0.worker.call(move |session| session.delete_task(path))
+        self.0
+            .worker
+            .call("delete_task", move |session| session.delete_task(path))
     }
 
     /// Enables or disables a registered task.
     pub fn set_enabled(&self, path: &TaskPath, enabled: bool) -> Result<()> {
         let path = path.clone();
-        self.0
-            .worker
-            .call(move |session| session.set_enabled(path, enabled))
+        self.0.worker.call("set_enabled", move |session| {
+            session.set_enabled(path, enabled)
+        })
     }
 
     /// Starts one task instance.
@@ -836,27 +1115,29 @@ impl BlockingScheduler {
         let path = path.clone();
         self.0
             .worker
-            .call(move |session| session.run(path, options))
+            .call("run", move |session| session.run(path, options))
     }
 
     /// Stops all instances of one registered task.
     pub fn stop_all(&self, path: &TaskPath) -> Result<()> {
         let path = path.clone();
-        self.0.worker.call(move |session| session.stop_all(path))
+        self.0
+            .worker
+            .call("stop_all", move |session| session.stop_all(path))
     }
 
     /// Stops one specific running instance.
     pub fn stop_instance(&self, instance_id: Uuid) -> Result<()> {
-        self.0
-            .worker
-            .call(move |session| session.stop_instance(instance_id))
+        self.0.worker.call("stop_instance", move |session| {
+            session.stop_instance(instance_id)
+        })
     }
 
     /// Lists running instances visible to the connected user.
     pub fn running_tasks(&self, include_hidden: bool) -> Result<Vec<RunningTask>> {
-        self.0
-            .worker
-            .call(move |session| session.running_tasks(include_hidden))
+        self.0.worker.call("running_tasks", move |session| {
+            session.running_tasks(include_hidden)
+        })
     }
 
     /// Creates a child folder, optionally with SDDL.
@@ -866,17 +1147,17 @@ impl BlockingScheduler {
         security: Option<SecurityDescriptor>,
     ) -> Result<TaskFolder> {
         let path = path.clone();
-        self.0
-            .worker
-            .call(move |session| session.create_folder(path, security))
+        self.0.worker.call("create_folder", move |session| {
+            session.create_folder(path, security)
+        })
     }
 
     /// Lists child folders, recursively when requested.
     pub fn list_folders(&self, path: &FolderPath, recursive: bool) -> Result<Vec<TaskFolder>> {
         let path = path.clone();
-        self.0
-            .worker
-            .call(move |session| session.list_folders(path, recursive))
+        self.0.worker.call("list_folders", move |session| {
+            session.list_folders(path, recursive)
+        })
     }
 
     /// Deletes an empty child folder.
@@ -884,7 +1165,7 @@ impl BlockingScheduler {
         let path = path.clone();
         self.0
             .worker
-            .call(move |session| session.delete_folder(path))
+            .call("delete_folder", move |session| session.delete_folder(path))
     }
 
     /// Reads a task's SDDL.
@@ -894,9 +1175,9 @@ impl BlockingScheduler {
         information: SecurityInformation,
     ) -> Result<SecurityDescriptor> {
         let path = path.clone();
-        self.0
-            .worker
-            .call(move |session| session.task_security(path, information))
+        self.0.worker.call("task_security", move |session| {
+            session.task_security(path, information)
+        })
     }
 
     /// Reads a folder's SDDL.
@@ -906,9 +1187,9 @@ impl BlockingScheduler {
         information: SecurityInformation,
     ) -> Result<SecurityDescriptor> {
         let path = path.clone();
-        self.0
-            .worker
-            .call(move |session| session.folder_security(path, information))
+        self.0.worker.call("folder_security", move |session| {
+            session.folder_security(path, information)
+        })
     }
 
     /// Replaces selected portions of a task security descriptor.
@@ -919,9 +1200,9 @@ impl BlockingScheduler {
         information: SecurityInformation,
     ) -> Result<()> {
         let path = path.clone();
-        self.0
-            .worker
-            .call(move |session| session.set_task_security(path, descriptor, information))
+        self.0.worker.call("set_task_security", move |session| {
+            session.set_task_security(path, descriptor, information)
+        })
     }
 
     /// Replaces selected portions of a folder security descriptor.
@@ -932,9 +1213,9 @@ impl BlockingScheduler {
         information: SecurityInformation,
     ) -> Result<()> {
         let path = path.clone();
-        self.0
-            .worker
-            .call(move |session| session.set_folder_security(path, descriptor, information))
+        self.0.worker.call("set_folder_security", move |session| {
+            session.set_folder_security(path, descriptor, information)
+        })
     }
 }
 
@@ -947,7 +1228,9 @@ pub struct AsyncScheduler(Scheduler);
 impl AsyncScheduler {
     /// Returns target capabilities.
     pub fn capabilities(&self) -> OperationFuture<Capabilities> {
-        self.0.worker.call_async(sys::Session::capabilities)
+        self.0
+            .worker
+            .call_async("capabilities", sys::Session::capabilities)
     }
 
     /// Queries Task Scheduler Operational event history.
@@ -955,7 +1238,7 @@ impl AsyncScheduler {
     pub fn history(&self, query: HistoryQuery) -> OperationFuture<Vec<HistoryEvent>> {
         self.0
             .worker
-            .call_async(move |session| session.history(query))
+            .call_async("history", move |session| session.history(query))
     }
 
     /// Explicitly enables or disables Task Scheduler Operational history.
@@ -963,7 +1246,17 @@ impl AsyncScheduler {
     pub fn set_history_enabled(&self, enabled: bool) -> OperationFuture<()> {
         self.0
             .worker
-            .call_async(move |session| session.set_history_enabled(enabled))
+            .call_async("set_history_enabled", move |session| {
+                session.set_history_enabled(enabled)
+            })
+    }
+
+    /// Reads the Operational channel configuration without changing it.
+    #[cfg(feature = "history")]
+    pub fn history_enabled(&self) -> OperationFuture<bool> {
+        self.0
+            .worker
+            .call_async("history_enabled", sys::Session::history_enabled)
     }
 
     /// Waits for a run without tying the future to a specific async runtime.
@@ -974,16 +1267,16 @@ impl AsyncScheduler {
         let cancelled = Arc::new(AtomicBool::new(false));
         let thread_cancelled = Arc::clone(&cancelled);
         let (sender, receiver) = futures_channel::oneshot::channel();
-        let spawned = thread::Builder::new()
-            .name("windows-task-wait".into())
-            .spawn(move || {
-                drop(sender.send(wait_for_run(
-                    &scheduler,
-                    &handle,
-                    options,
-                    Some(&thread_cancelled),
-                )));
-            });
+        let trace = crate::observe::Operation::new("wait_for_run_async");
+        let response_trace = trace.clone();
+        let spawned =
+            thread::Builder::new()
+                .name("windows-task-wait".into())
+                .spawn(move || {
+                    drop(sender.send(trace.run(|| {
+                        wait_for_run(&scheduler, &handle, options, Some(&thread_cancelled))
+                    })));
+                });
         WaitFuture {
             receiver: spawned.as_ref().ok().map(|_| receiver),
             immediate: spawned.err().map(|error| {
@@ -993,6 +1286,7 @@ impl AsyncScheduler {
                 )
             }),
             cancelled,
+            trace: response_trace,
         }
     }
 
@@ -1001,14 +1295,14 @@ impl AsyncScheduler {
     pub fn validate(&self, definition: TaskDefinition) -> OperationFuture<ValidationReport> {
         self.0
             .worker
-            .call_async(move |session| session.validate(definition))
+            .call_async("validate", move |session| session.validate(definition))
     }
 
     /// Gets one registered task and its original XML.
     pub fn get_task(&self, path: TaskPath) -> OperationFuture<RegisteredTask> {
         self.0
             .worker
-            .call_async(move |session| session.get_task(path))
+            .call_async("get_task", move |session| session.get_task(path))
     }
 
     /// Enumerates tasks beneath a folder.
@@ -1017,9 +1311,9 @@ impl AsyncScheduler {
         folder: FolderPath,
         options: ListOptions,
     ) -> OperationFuture<Vec<RegisteredTask>> {
-        self.0
-            .worker
-            .call_async(move |session| session.list_tasks(folder, options))
+        self.0.worker.call_async("list_tasks", move |session| {
+            session.list_tasks(folder, options)
+        })
     }
 
     /// Registers a typed task definition.
@@ -1029,9 +1323,9 @@ impl AsyncScheduler {
         definition: TaskDefinition,
         options: RegistrationOptions,
     ) -> OperationFuture<RegisteredTask> {
-        self.0
-            .worker
-            .call_async(move |session| session.register(path, definition, options))
+        self.0.worker.call_async("register", move |session| {
+            session.register(path, definition, options)
+        })
     }
 
     /// Registers a bounded raw Task XML document.
@@ -1043,31 +1337,31 @@ impl AsyncScheduler {
         logon_type: LogonType,
         options: RegistrationOptions,
     ) -> OperationFuture<RegisteredTask> {
-        self.0
-            .worker
-            .call_async(move |session| session.register_raw(path, xml, logon_type, options))
+        self.0.worker.call_async("register_raw", move |session| {
+            session.register_raw(path, xml, logon_type, options)
+        })
     }
 
     /// Deletes a registered task.
     pub fn delete_task(&self, path: TaskPath) -> OperationFuture<()> {
         self.0
             .worker
-            .call_async(move |session| session.delete_task(path))
+            .call_async("delete_task", move |session| session.delete_task(path))
     }
 
     /// Enables or disables a registered task.
     #[must_use]
     pub fn set_enabled(&self, path: TaskPath, enabled: bool) -> OperationFuture<()> {
-        self.0
-            .worker
-            .call_async(move |session| session.set_enabled(path, enabled))
+        self.0.worker.call_async("set_enabled", move |session| {
+            session.set_enabled(path, enabled)
+        })
     }
 
     /// Starts a task instance.
     pub fn run(&self, path: TaskPath, options: RunOptions) -> OperationFuture<RunHandle> {
         self.0
             .worker
-            .call_async(move |session| session.run(path, options))
+            .call_async("run", move |session| session.run(path, options))
     }
 
     /// Stops all instances of one task.
@@ -1075,23 +1369,23 @@ impl AsyncScheduler {
     pub fn stop_all(&self, path: TaskPath) -> OperationFuture<()> {
         self.0
             .worker
-            .call_async(move |session| session.stop_all(path))
+            .call_async("stop_all", move |session| session.stop_all(path))
     }
 
     /// Stops one instance by GUID.
     #[must_use]
     pub fn stop_instance(&self, instance_id: Uuid) -> OperationFuture<()> {
-        self.0
-            .worker
-            .call_async(move |session| session.stop_instance(instance_id))
+        self.0.worker.call_async("stop_instance", move |session| {
+            session.stop_instance(instance_id)
+        })
     }
 
     /// Lists running task instances.
     #[must_use]
     pub fn running_tasks(&self, include_hidden: bool) -> OperationFuture<Vec<RunningTask>> {
-        self.0
-            .worker
-            .call_async(move |session| session.running_tasks(include_hidden))
+        self.0.worker.call_async("running_tasks", move |session| {
+            session.running_tasks(include_hidden)
+        })
     }
 
     /// Creates one child folder.
@@ -1101,9 +1395,9 @@ impl AsyncScheduler {
         path: FolderPath,
         security: Option<SecurityDescriptor>,
     ) -> OperationFuture<TaskFolder> {
-        self.0
-            .worker
-            .call_async(move |session| session.create_folder(path, security))
+        self.0.worker.call_async("create_folder", move |session| {
+            session.create_folder(path, security)
+        })
     }
 
     /// Lists child folders.
@@ -1113,9 +1407,9 @@ impl AsyncScheduler {
         path: FolderPath,
         recursive: bool,
     ) -> OperationFuture<Vec<TaskFolder>> {
-        self.0
-            .worker
-            .call_async(move |session| session.list_folders(path, recursive))
+        self.0.worker.call_async("list_folders", move |session| {
+            session.list_folders(path, recursive)
+        })
     }
 
     /// Deletes one empty child folder.
@@ -1123,7 +1417,7 @@ impl AsyncScheduler {
     pub fn delete_folder(&self, path: FolderPath) -> OperationFuture<()> {
         self.0
             .worker
-            .call_async(move |session| session.delete_folder(path))
+            .call_async("delete_folder", move |session| session.delete_folder(path))
     }
 
     /// Reads task SDDL.
@@ -1133,9 +1427,9 @@ impl AsyncScheduler {
         path: TaskPath,
         information: SecurityInformation,
     ) -> OperationFuture<SecurityDescriptor> {
-        self.0
-            .worker
-            .call_async(move |session| session.task_security(path, information))
+        self.0.worker.call_async("task_security", move |session| {
+            session.task_security(path, information)
+        })
     }
 
     /// Reads folder SDDL.
@@ -1145,9 +1439,9 @@ impl AsyncScheduler {
         path: FolderPath,
         information: SecurityInformation,
     ) -> OperationFuture<SecurityDescriptor> {
-        self.0
-            .worker
-            .call_async(move |session| session.folder_security(path, information))
+        self.0.worker.call_async("folder_security", move |session| {
+            session.folder_security(path, information)
+        })
     }
 
     /// Replaces selected task security descriptor portions.
@@ -1160,7 +1454,9 @@ impl AsyncScheduler {
     ) -> OperationFuture<()> {
         self.0
             .worker
-            .call_async(move |session| session.set_task_security(path, descriptor, information))
+            .call_async("set_task_security", move |session| {
+                session.set_task_security(path, descriptor, information)
+            })
     }
 
     /// Replaces selected folder security descriptor portions.
@@ -1173,14 +1469,19 @@ impl AsyncScheduler {
     ) -> OperationFuture<()> {
         self.0
             .worker
-            .call_async(move |session| session.set_folder_security(path, descriptor, information))
+            .call_async("set_folder_security", move |session| {
+                session.set_folder_security(path, descriptor, information)
+            })
     }
 
     /// Runs target diagnostics.
     pub fn doctor(&self) -> OperationFuture<DiagnosticReport> {
-        self.0.worker.call_async(sys::Session::doctor)
+        self.0.worker.call_async("doctor", sys::Session::doctor)
     }
 }
+
+#[cfg(feature = "history")]
+mod wait;
 
 #[cfg(feature = "history")]
 fn wait_for_run(
@@ -1189,100 +1490,18 @@ fn wait_for_run(
     options: WaitOptions,
     cancelled: Option<&AtomicBool>,
 ) -> Result<RunOutcome> {
-    if options.poll_interval.is_zero() {
-        return Err(Error::new(
-            ErrorKind::InvalidDefinition,
-            "run wait poll interval must be non-zero",
-        ));
-    }
-    let started = Instant::now();
-    let since = SystemTime::now()
-        .checked_sub(Duration::from_secs(2))
-        .unwrap_or(SystemTime::UNIX_EPOCH);
-    let mut history_usable = true;
-    let mut observed_running = false;
-    let mut absent_since = None::<Instant>;
-    loop {
-        if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
-            return Err(Error::new(ErrorKind::Cancelled, "run wait was cancelled")
-                .with_target(handle.instance_id.to_string()));
-        }
-        if started.elapsed() >= options.timeout {
-            return Err(Error::new(ErrorKind::Timeout, "task run wait elapsed")
-                .with_target(handle.instance_id.to_string()));
-        }
-
-        if history_usable {
-            let query = HistoryQuery {
-                task: Some(handle.path.clone()),
-                instance_id: Some(handle.instance_id),
-                since: Some(since),
-                limit: Some(64),
-                forward: false,
-            };
-            match scheduler.history(query) {
-                Ok(events) => {
-                    for event in events {
-                        let result_code = match event.kind {
-                            HistoryEventKind::Completed
-                            | HistoryEventKind::Failed
-                            | HistoryEventKind::Stopped => event.result_code,
-                            _ => None,
-                        };
-                        if let Some(result_code) = result_code {
-                            return Ok(RunOutcome {
-                                instance_id: handle.instance_id,
-                                result_code,
-                                confidence: ResultConfidence::Exact,
-                            });
-                        }
-                    }
-                }
-                Err(_) if options.allow_polling_fallback => history_usable = false,
-                Err(error) => return Err(error),
-            }
-        }
-
-        let running = scheduler.running_tasks(true)?;
-        if running
-            .iter()
-            .any(|instance| instance.instance_id == handle.instance_id)
-        {
-            observed_running = true;
-            absent_since = None;
-        } else {
-            absent_since.get_or_insert_with(Instant::now);
-        }
-        let absent_long_enough =
-            absent_since.is_some_and(|instant| instant.elapsed() >= options.history_grace);
-        let start_grace_elapsed = started.elapsed() >= options.history_grace;
-        if options.allow_polling_fallback
-            && absent_long_enough
-            && (observed_running || start_grace_elapsed)
-        {
-            let task = scheduler.get_task(&handle.path)?;
-            return Ok(RunOutcome {
-                instance_id: handle.instance_id,
-                result_code: task.last_result,
-                confidence: ResultConfidence::PollingFallback,
-            });
-        }
-        if !history_usable && !options.allow_polling_fallback {
-            return Err(Error::new(
-                ErrorKind::HistoryUnavailable,
-                "exact run correlation requires readable Task Scheduler history",
-            ));
-        }
-        let remaining = options.timeout.saturating_sub(started.elapsed());
-        thread::sleep(
-            options
-                .poll_interval
-                .min(remaining)
-                .min(Duration::from_secs(1)),
-        );
-    }
+    crate::observe::Operation::new("wait_for_run").run(|| {
+        wait::observe_run(
+            &wait::Live {
+                scheduler,
+                started: Instant::now(),
+            },
+            handle,
+            options,
+            cancelled,
+        )
+    })
 }
-
 #[cfg(windows)]
 pub(crate) fn parse_task_path(value: &str) -> Result<TaskPath> {
     TaskPath::from_str(value).map_err(|error| Error::new(ErrorKind::InvalidPath, error.to_string()))
@@ -1292,4 +1511,228 @@ pub(crate) fn parse_task_path(value: &str) -> Result<TaskPath> {
 pub(crate) fn parse_folder_path(value: &str) -> Result<FolderPath> {
     FolderPath::from_str(value)
         .map_err(|error| Error::new(ErrorKind::InvalidPath, error.to_string()))
+}
+
+#[cfg(all(test, feature = "async"))]
+mod worker_tests {
+    use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    #[test]
+    fn connection_drop_cancels_before_claim_and_preserves_started_work() {
+        for start_first in [false, true] {
+            let state = Arc::new(AtomicU8::new(OPERATION_QUEUED));
+            let worker_state = Arc::clone(&state);
+            let (_sender, receiver) = futures_channel::oneshot::channel();
+            let future = ConnectFuture {
+                receiver,
+                trace: crate::observe::Operation::new("connect_drop_test"),
+                state,
+            };
+            let (ready, started) = mpsc::channel();
+            let (release, gate) = mpsc::channel();
+            let worker = thread::spawn(move || {
+                if start_first {
+                    assert!(begin_operation(&worker_state));
+                }
+                ready.send(()).expect("claim boundary");
+                gate.recv().expect("release boundary");
+                if start_first {
+                    worker_state.load(Ordering::Acquire) == OPERATION_STARTED
+                } else {
+                    begin_operation(&worker_state)
+                }
+            });
+            started
+                .recv_timeout(Duration::from_secs(5))
+                .expect("worker at boundary");
+            drop(future);
+            release.send(()).expect("release worker");
+            assert_eq!(worker.join().expect("worker completed"), start_first);
+        }
+    }
+
+    fn worker() -> Worker<()> {
+        let (sender, receiver) = mpsc::channel::<Job<()>>();
+        let join = thread::spawn(move || {
+            for job in receiver {
+                job(&mut ());
+            }
+        });
+        Worker {
+            sender: Mutex::new(Some(sender)),
+            join: Mutex::new(Some(join)),
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "tracing")]
+    fn pending_and_ready_polls_restore_the_callers_span() {
+        struct Wake;
+        impl std::task::Wake for Wake {
+            fn wake(self: Arc<Self>) {}
+        }
+        tracing::subscriber::with_default(tracing_subscriber::registry(), || {
+            let worker = worker();
+            let (release, gate) = mpsc::channel();
+            let mut future = worker.call_async("poll_scope", move |()| {
+                gate.recv().expect("release operation");
+                Ok(())
+            });
+            let waker = std::task::Waker::from(Arc::new(Wake));
+            let mut context = Context::from_waker(&waker);
+            let caller = tracing::info_span!("unrelated_poll_caller");
+            caller.in_scope(|| {
+                assert!(Pin::new(&mut future).poll(&mut context).is_pending());
+                assert_eq!(tracing::Span::current().id(), caller.id());
+            });
+            assert!(tracing::Span::current().id().is_none());
+            release.send(()).expect("release operation");
+            worker
+                .call("response_barrier", |()| Ok(()))
+                .expect("response ready");
+            caller.in_scope(|| {
+                assert!(matches!(
+                    Pin::new(&mut future).poll(&mut context),
+                    Poll::Ready(Ok(()))
+                ));
+                assert_eq!(tracing::Span::current().id(), caller.id());
+            });
+            worker
+                .shutdown(Duration::from_secs(5))
+                .expect("worker finished");
+        });
+    }
+
+    #[test]
+    fn shutdown_timeout_preserves_worker_until_rpc_and_cleanup_finish() {
+        let worker = worker();
+        let (ready, started) = mpsc::channel();
+        let (release, gate) = mpsc::channel();
+        let future = worker.call_async("blocked_shutdown", move |()| {
+            ready.send(()).expect("started");
+            gate.recv().expect("release");
+            Ok(())
+        });
+        started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("operation running");
+        assert_eq!(
+            worker
+                .shutdown(Duration::ZERO)
+                .expect_err("RPC is blocked")
+                .kind(),
+            ErrorKind::Timeout
+        );
+        assert_eq!(
+            worker
+                .call("closed", |()| Ok(()))
+                .expect_err("no new work")
+                .kind(),
+            ErrorKind::WorkerStopped
+        );
+        release.send(()).expect("release RPC");
+        worker
+            .shutdown(Duration::from_secs(5))
+            .expect("confirmed cleanup");
+        worker
+            .shutdown(Duration::ZERO)
+            .expect("idempotent shutdown");
+        drop(future);
+    }
+
+    #[test]
+    fn dropping_a_completed_response_does_not_revert_the_operation() {
+        let worker = worker();
+        let mutations = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&mutations);
+        let future = worker.call_async("completed_response", move |()| {
+            count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        worker
+            .call("response_barrier", |()| Ok(()))
+            .expect("response sent");
+        assert!(future.has_started());
+        drop(future);
+        assert_eq!(mutations.load(Ordering::SeqCst), 1);
+        worker
+            .shutdown(Duration::from_secs(5))
+            .expect("worker finished");
+    }
+
+    #[test]
+    fn dropping_a_queued_future_prevents_its_mutation() {
+        let worker = worker();
+        let (ready, started) = mpsc::channel();
+        let (release, gate) = mpsc::channel();
+        let first = worker.call_async("gate", move |()| {
+            ready.send(()).expect("started");
+            gate.recv().expect("released");
+            Ok(())
+        });
+        started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("gate running");
+        let mutations = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&mutations);
+        let queued = worker.call_async("mutation", move |()| {
+            count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        assert!(!queued.has_started());
+        drop(queued);
+        release.send(()).expect("release gate");
+        worker.call("barrier", |()| Ok(())).expect("queue drained");
+        assert_eq!(mutations.load(Ordering::SeqCst), 0);
+        drop(first);
+    }
+
+    #[test]
+    fn dropping_an_inflight_future_does_not_claim_rpc_cancellation() {
+        let worker = worker();
+        let (ready, started) = mpsc::channel();
+        let (release, gate) = mpsc::channel();
+        let mutations = Arc::new(AtomicUsize::new(0));
+        let count = Arc::clone(&mutations);
+        let future = worker.call_async("inflight", move |()| {
+            ready.send(()).expect("started");
+            gate.recv().expect("released");
+            count.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("operation running");
+        assert!(future.has_started());
+        drop(future);
+        release.send(()).expect("release operation");
+        worker.call("barrier", |()| Ok(())).expect("queue drained");
+        assert_eq!(mutations.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn dropping_worker_does_not_wait_for_a_blocked_operation() {
+        let worker = worker();
+        let (ready, started) = mpsc::channel();
+        let (release, gate) = mpsc::channel();
+        let future = worker.call_async("blocked", move |()| {
+            ready.send(()).expect("started");
+            gate.recv().expect("release");
+            Ok(())
+        });
+        started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("operation running");
+        let (dropped, completed) = mpsc::channel();
+        thread::spawn(move || {
+            drop(worker);
+            dropped.send(()).expect("drop acknowledged");
+        });
+        completed
+            .recv_timeout(Duration::from_secs(5))
+            .expect("Drop must not join blocked RPC");
+        release.send(()).expect("release operation");
+        drop(future);
+    }
 }

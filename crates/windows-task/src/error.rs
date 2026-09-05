@@ -2,6 +2,11 @@ use std::fmt;
 
 /// Broad, stable classification for errors returned by this crate.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[cfg_attr(
+    feature = "serde",
+    derive(serde::Serialize, serde::Deserialize),
+    serde(rename_all = "snake_case")
+)]
 #[non_exhaustive]
 pub enum ErrorKind {
     /// The operation is unavailable on the current platform.
@@ -36,6 +41,10 @@ pub enum ErrorKind {
     Timeout,
     /// Task Scheduler event history is unavailable.
     HistoryUnavailable,
+    /// An event bookmark is no longer valid; records may have been lost.
+    HistoryGap,
+    /// A bounded query cannot establish a complete result.
+    QueryLimit,
     /// Current state conflicts with the requested ownership or operation.
     Conflict,
     /// The operation cannot be safely rolled back with the supplied inputs.
@@ -48,12 +57,17 @@ pub enum ErrorKind {
 
 /// Error with stable classification and native diagnostic context.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct Error {
     kind: ErrorKind,
     message: String,
     operation: Option<String>,
     target: Option<String>,
     native_code: Option<i32>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    diagnostics: Vec<crate::Diagnostic>,
+    #[cfg_attr(feature = "serde", serde(default))]
+    context: std::collections::BTreeMap<String, String>,
 }
 
 impl Error {
@@ -66,6 +80,8 @@ impl Error {
             operation: None,
             target: None,
             native_code: None,
+            diagnostics: Vec::new(),
+            context: std::collections::BTreeMap::new(),
         }
     }
 
@@ -81,6 +97,30 @@ impl Error {
     pub fn with_target(mut self, target: impl Into<String>) -> Self {
         self.target = Some(target.into());
         self
+    }
+
+    /// Retains actionable validation findings instead of flattening them.
+    #[must_use]
+    pub fn with_validation(mut self, report: crate::ValidationReport) -> Self {
+        self.diagnostics = report.diagnostics;
+        self
+    }
+
+    /// Adds structured observation context. This is not automatically traced.
+    #[must_use]
+    pub fn with_context(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.context.insert(key.into(), value.into());
+        self
+    }
+
+    /// Validation findings associated with this error.
+    pub fn diagnostics(&self) -> &[crate::Diagnostic] {
+        &self.diagnostics
+    }
+
+    /// Last observed state or other structured error context.
+    pub fn context(&self) -> &std::collections::BTreeMap<String, String> {
+        &self.context
     }
 
     /// Adds the original HRESULT or Win32 error value.

@@ -111,7 +111,8 @@ pub struct RegistrationInfo {
     pub source: Option<String>,
     /// Version of the task definition.
     pub version: Option<String>,
-    /// Unique registration URI. Reconcile reserves this for ownership markers.
+    /// Registration URI. Windows can rewrite this to the task path; reconcile
+    /// stores ownership in Source and accepts legacy URI markers when present.
     pub uri: Option<String>,
     /// Optional task security descriptor.
     pub security_descriptor: Option<SecurityDescriptor>,
@@ -127,6 +128,50 @@ pub struct RegistrationInfo {
 pub struct SecurityDescriptor(String);
 
 impl SecurityDescriptor {
+    #[cfg(all(feature = "client", any(windows, feature = "reconcile", test)))]
+    pub(crate) fn access_equivalent(&self, other: &Self) -> bool {
+        fn key(value: &str) -> String {
+            // Normalize only the Windows auto-inheritance status bit. Preserve
+            // protection, requested inheritance, ACE flags and ACE ordering.
+            // Conditional expressions are opaque and are compared verbatim.
+            if value.contains(['\'', '"']) {
+                return value.into();
+            }
+            let mut output = String::new();
+            let mut remaining = value;
+            let mut depth = 0_usize;
+            while let Some(character) = remaining.chars().next() {
+                if depth == 0 && (remaining.starts_with("D:") || remaining.starts_with("S:")) {
+                    output.push_str(&remaining[..2]);
+                    remaining = &remaining[2..];
+                    loop {
+                        if let Some(rest) = remaining.strip_prefix("AI") {
+                            remaining = rest;
+                        } else if let Some(rest) = remaining.strip_prefix("AR") {
+                            output.push_str("AR");
+                            remaining = rest;
+                        } else if let Some(rest) = remaining.strip_prefix('P') {
+                            output.push('P');
+                            remaining = rest;
+                        } else {
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                match character {
+                    '(' => depth += 1,
+                    ')' => depth = depth.saturating_sub(1),
+                    _ => {}
+                }
+                output.push(character);
+                remaining = &remaining[character.len_utf8()..];
+            }
+            output
+        }
+        key(self.as_sddl()) == key(other.as_sddl())
+    }
+
     /// Creates an SDDL descriptor. Native semantic validation also occurs when
     /// the descriptor is applied on Windows.
     pub fn from_sddl(value: impl Into<String>) -> Result<Self, InvalidSecurityDescriptor> {
@@ -414,4 +459,35 @@ pub(crate) fn duplicate_ids(values: impl Iterator<Item = String>) -> BTreeSet<St
         }
     }
     duplicates
+}
+
+#[cfg(all(test, feature = "client"))]
+mod security_tests {
+    use super::SecurityDescriptor;
+    #[test]
+    fn composite_inheritance_flags_preserve_requests_and_protection() {
+        let descriptor = |text| SecurityDescriptor::from_sddl(text).expect("fixture SDDL");
+        for section in ["D", "S"] {
+            for flags in ["AR", "PAR"] {
+                let expected = descriptor(format!("{section}:{flags}(A;;FA;;;SY)"));
+                let observed = descriptor(format!("{section}:{flags}AI(A;;FA;;;SY)"));
+                assert!(expected.access_equivalent(&observed));
+                let unprotected = descriptor(format!("{section}:(A;;FA;;;SY)"));
+                assert!(!expected.access_equivalent(&unprotected));
+            }
+        }
+    }
+    #[test]
+    fn comparison_preserves_protection_rights_and_ace_order() {
+        let descriptor = |text| SecurityDescriptor::from_sddl(text).expect("fixture SDDL");
+        let expected = descriptor("D:P(A;;FA;;;SY)(D;;FR;;;BA)");
+        assert!(expected.access_equivalent(&descriptor("D:PAI(A;;FA;;;SY)(D;;FR;;;BA)")));
+        for other in [
+            "D:(A;;FA;;;SY)(D;;FR;;;BA)",
+            "D:P(D;;FR;;;BA)(A;;FA;;;SY)",
+            "D:P(A;;FR;;;SY)(D;;FR;;;BA)",
+        ] {
+            assert!(!expected.access_equivalent(&descriptor(other)));
+        }
+    }
 }
