@@ -30,6 +30,10 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 
 - YAML output quotes ambiguous strings, including trailing colons, whitespace
   and control characters found by guided fuzzing, while retaining Rust 1.85.
+- Stop requests during compensation are included in irreversible-effect reports,
+  so removing a newly created task cannot falsely imply complete restoration.
+- Recovery includes observed SACL sections for newly created folders. Conditional
+  ACE strings no longer cause unrelated security sections to be requested.
 - Standard XML entities and valid numeric references no longer fail parsing.
 - Event batches release all handles on early exit; bookmark watchers detect
   lost anchors and apply bounded backpressure.

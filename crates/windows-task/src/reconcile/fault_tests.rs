@@ -27,6 +27,7 @@ struct Fake {
     faults: RefCell<Vec<Fault>>,
     drift: RefCell<Option<(&'static str, usize, TaskPath)>>,
     registrations: RefCell<Vec<RegistrationContract>>,
+    folder_security_writes: RefCell<Vec<SecurityInformation>>,
 }
 
 // Store presence, never the fixture credential bytes, in inspectable history.
@@ -278,8 +279,9 @@ impl Backend for Fake {
         &self,
         path: &FolderPath,
         descriptor: SecurityDescriptor,
-        _: SecurityInformation,
+        information: SecurityInformation,
     ) -> Result<()> {
+        self.folder_security_writes.borrow_mut().push(information);
         self.invoke("set_folder_security", |state| {
             *state.folders.get_mut(path).ok_or_else(missing)? = descriptor;
             Ok(())

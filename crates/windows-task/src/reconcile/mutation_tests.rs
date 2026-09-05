@@ -2,6 +2,285 @@
 use super::*;
 
 #[test]
+fn new_folder_compensation_restores_the_observed_sacl_too() {
+    let (backend, mut manifest) = fixture(2);
+    apply_fixture(&backend, &manifest);
+    let folder = manifest.namespace.join("Audit").expect("new folder");
+    manifest.folders.push(crate::manifest::ManagedFolder {
+        path: folder,
+        security_descriptor: Some(
+            SecurityDescriptor::from_sddl("S:(AU;SA;GR;;;WD)").expect("audit ACL"),
+        ),
+    });
+    manifest.tasks.truncate(1);
+    backend.fail("delete_task", 1, false);
+    let failure = apply_backend(
+        &backend,
+        &manifest,
+        ApplyOptions {
+            prune: true,
+            ..ApplyOptions::default()
+        },
+        &mut NoCredentials,
+    )
+    .expect_err("later prune fails");
+    assert!(failure.report.rollback_complete());
+    assert_eq!(
+        *backend.folder_security_writes.borrow(),
+        [SecurityInformation::SACL, SecurityInformation::all()]
+    );
+}
+
+#[test]
+fn plan_order_is_independent_of_manifest_input_order() {
+    let (_, manifest) = fixture(4);
+    let first = plan(&manifest, &[], false).expect("first order");
+    let mut reordered = manifest;
+    reordered.tasks.reverse();
+    assert_eq!(
+        plan(&reordered, &[], false).expect("reordered input"),
+        first
+    );
+}
+
+#[test]
+fn inspection_and_acl_verification_reject_each_independent_state_change() {
+    let (backend, mut manifest) = fixture(1);
+    apply_fixture(&backend, &manifest);
+    let state = inspect_backend(&backend, &manifest).expect("inspection");
+    let path = manifest.tasks[0].path.clone();
+    let change = Change::SetTaskSecurity(path.clone());
+    let before = observe(&backend, &manifest, &change, false).expect("snapshot");
+    assert!(recovery::agrees_with_inspection(&state, &change, &before));
+    for enabled_drift in [false, true] {
+        let mut after = before.clone();
+        let Observed::Task {
+            definition,
+            enabled,
+            ..
+        } = &mut after
+        else {
+            panic!("task")
+        };
+        if enabled_drift {
+            *enabled = !*enabled;
+        } else {
+            definition.registration.description = Some("external edit".into());
+        }
+        assert!(!recovery::agrees_with_inspection(&state, &change, &after));
+    }
+    manifest.tasks[0]
+        .definition
+        .registration
+        .security_descriptor =
+        Some(SecurityDescriptor::from_sddl("D:(A;;GR;;;SY)").expect("desired ACL"));
+    assert!(
+        !recovery::expected_after(&backend, &before, &before, &manifest, &change),
+        "unchanged definition cannot excuse incorrect ACL"
+    );
+    backend
+        .state
+        .borrow_mut()
+        .tasks
+        .get_mut(&path)
+        .expect("task")
+        .registration
+        .security_descriptor = manifest.tasks[0]
+        .definition
+        .registration
+        .security_descriptor
+        .clone();
+    assert!(recovery::expected_after(
+        &backend, &before, &before, &manifest, &change
+    ));
+}
+
+#[test]
+fn security_observation_includes_base_sections_and_only_the_matching_folder() {
+    let (_, mut manifest) = fixture(1);
+    let base = SecurityInformation::OWNER | SecurityInformation::GROUP | SecurityInformation::DACL;
+    assert_eq!(
+        recovery::information(
+            &manifest,
+            &Change::UpdateTask(manifest.tasks[0].path.clone())
+        ),
+        base
+    );
+    let child = manifest.namespace.join("Audit").expect("child");
+    manifest.folders.extend([
+        crate::manifest::ManagedFolder {
+            path: manifest.namespace.clone(),
+            security_descriptor: Some(acl()),
+        },
+        crate::manifest::ManagedFolder {
+            path: child.clone(),
+            security_descriptor: Some(
+                SecurityDescriptor::from_sddl("S:(AU;SA;GR;;;WD)").expect("SACL"),
+            ),
+        },
+    ]);
+    assert_eq!(
+        recovery::information(
+            &manifest,
+            &Change::SetFolderSecurity(manifest.namespace.clone())
+        ),
+        base
+    );
+    assert_eq!(
+        recovery::information(&manifest, &Change::SetFolderSecurity(child)),
+        SecurityInformation::all()
+    );
+}
+
+#[test]
+fn missing_backup_data_requires_explicit_irreversible_permission() {
+    for folder in [false, true] {
+        for allow in [false, true] {
+            let (backend, mut manifest) = fixture(1);
+            apply_fixture(&backend, &manifest);
+            let change = if folder {
+                manifest.folders.push(crate::manifest::ManagedFolder {
+                    path: manifest.namespace.clone(),
+                    security_descriptor: Some(acl()),
+                });
+                Change::SetFolderSecurity(manifest.namespace.clone())
+            } else {
+                manifest.tasks[0]
+                    .definition
+                    .registration
+                    .security_descriptor = Some(acl());
+                Change::SetTaskSecurity(manifest.tasks[0].path.clone())
+            };
+            let plan = Plan {
+                changes: vec![PlannedChange {
+                    change,
+                    rollback: RollbackSafety::Reversible,
+                }],
+                irreversible_effects: Vec::new(),
+            };
+            backend.fail(
+                if folder {
+                    "folder_security"
+                } else {
+                    "task_security"
+                },
+                1,
+                false,
+            );
+            match prepare(&backend, &manifest, &plan, allow, &mut NoCredentials) {
+                Ok(prepared) => {
+                    assert!(allow);
+                    assert!(prepared.task_security.is_empty());
+                    assert!(prepared.folder_security.is_empty());
+                }
+                Err(error) => {
+                    assert!(!allow);
+                    assert_eq!(error.kind(), ErrorKind::AccessDenied);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn task_backup_credentials_and_security_require_explicit_irreversible_permission() {
+    for password_failure in [false, true] {
+        for allow in [false, true] {
+            let (backend, mut manifest) = fixture(1);
+            apply_fixture(&backend, &manifest);
+            if password_failure {
+                backend
+                    .state
+                    .borrow_mut()
+                    .tasks
+                    .get_mut(&manifest.tasks[0].path)
+                    .expect("task")
+                    .principal
+                    .logon_type = LogonType::Password;
+                backend
+                    .state
+                    .borrow_mut()
+                    .tasks
+                    .get_mut(&manifest.tasks[0].path)
+                    .expect("task")
+                    .principal
+                    .identity = crate::model::PrincipalIdentity::User("fixture-user".into());
+            } else {
+                backend.fail("task_security", 1, false);
+            }
+            manifest.tasks[0].definition.registration.description = Some("update".into());
+            let plan = Plan {
+                changes: vec![PlannedChange {
+                    change: Change::UpdateTask(manifest.tasks[0].path.clone()),
+                    rollback: RollbackSafety::Reversible,
+                }],
+                irreversible_effects: Vec::new(),
+            };
+            match prepare(&backend, &manifest, &plan, allow, &mut NoCredentials) {
+                Ok(prepared) => {
+                    assert!(allow);
+                    let backup = &prepared.task_backups[&manifest.tasks[0].path];
+                    if password_failure {
+                        assert!(backup.password.is_none());
+                    } else {
+                        assert!(backup.security.is_none());
+                    }
+                }
+                Err(error) => {
+                    assert!(!allow);
+                    assert_eq!(
+                        error.kind(),
+                        if password_failure {
+                            ErrorKind::Irreversible
+                        } else {
+                            ErrorKind::AccessDenied
+                        }
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn conditional_ace_text_does_not_request_unrelated_security_sections() {
+    for expression in ["S:O:G:", ")S:O:G:", "日本語 S:"] {
+        let text = format!("D:(XA;;GR;;;WD;(@User.label == \"{expression}\"))");
+        let descriptor = SecurityDescriptor::from_sddl(text).expect("conditional SDDL");
+        assert_eq!(
+            security_information_for_sddl(&descriptor),
+            SecurityInformation::DACL
+        );
+    }
+}
+
+#[test]
+fn stopping_a_new_task_during_compensation_is_also_irreversible() {
+    let (backend, manifest) = fixture(2);
+    backend.fail("register", 2, false);
+    let failure = apply_backend(
+        &backend,
+        &manifest,
+        ApplyOptions {
+            stop_running: true,
+            ..ApplyOptions::default()
+        },
+        &mut NoCredentials,
+    )
+    .expect_err("second registration fails");
+    assert!(backend.state.borrow().tasks.is_empty());
+    assert_eq!(failure.report.rolled_back.len(), 1);
+    assert_eq!(
+        failure.report.irreversible_effects,
+        [manifest.tasks[0].path.clone()]
+    );
+    assert!(
+        !failure.report.rollback_complete(),
+        "stopped instances cannot be restored by deleting a definition"
+    );
+}
+
+#[test]
 fn sequential_changes_to_one_target_share_preconditions_and_reverse_in_order() {
     for fail_after_changes in [false, true] {
         let (backend, mut manifest) = fixture(2);

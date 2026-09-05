@@ -254,6 +254,11 @@ pub(super) fn compensate_observed(
                 phase: ApplyPhase::Rollback,
                 journal: &native_journal,
             };
+            if let (true, Change::CreateTask(path)) = (options.stop_running, &entry.change) {
+                // Compensation may stop an instance created by this apply. Its
+                // effects are irreversible even if deleting the definition works.
+                report.irreversible_effects.push(path.clone());
+            }
             let result = compensate_change(&recorded, &entry.change, options, prepared);
             report.journal.extend(native_journal.into_inner());
             result?;

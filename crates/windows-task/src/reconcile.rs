@@ -754,9 +754,7 @@ fn apply_backend(
                     .entry(path.clone())
                     .or_insert_with(|| SecuritySnapshot {
                         descriptor: descriptor.clone(),
-                        information: SecurityInformation::OWNER
-                            | SecurityInformation::GROUP
-                            | SecurityInformation::DACL,
+                        information: recovery::information(manifest, change),
                     });
             }
         }
@@ -813,18 +811,8 @@ fn apply_backend(
             phase: ApplyPhase::Mutation,
             journal: &native_journal,
         };
-        let result = crate::observe::Operation::new("apply.change").run(|| {
-            execute_change(
-                &recorded,
-                manifest,
-                change,
-                ApplyOptions {
-                    stop_running: false,
-                    ..options
-                },
-                &mut prepared,
-            )
-        });
+        let result = crate::observe::Operation::new("apply.change")
+            .run(|| execute_change(&recorded, manifest, change, options, &mut prepared));
         report.journal.extend(native_journal.into_inner());
         record(
             &mut report,
@@ -1127,9 +1115,7 @@ fn execute_change(
             scheduler.create_folder(path, None)?;
         }
         Change::CreateTask(path) | Change::UpdateTask(path) | Change::AdoptTask(path) => {
-            if options.stop_running && !matches!(change, Change::CreateTask(_)) {
-                scheduler.stop_all(path)?;
-            }
+            // Stop requests belong to apply_backend's journaled phase.
             let desired = managed_task(manifest, path)?;
             let mut definition = owned_definition(manifest, desired);
             if !matches!(change, Change::CreateTask(_))
@@ -1158,9 +1144,6 @@ fn execute_change(
             scheduler.get_task(path)?;
         }
         Change::DeleteTask(path) => {
-            if options.stop_running {
-                scheduler.stop_all(path)?;
-            }
             scheduler.delete_task(path)?;
         }
         Change::SetEnabled { path, enabled } => scheduler.set_enabled(path, *enabled)?,
@@ -1372,17 +1355,35 @@ const fn password_backed(logon_type: LogonType) -> bool {
 fn security_information_for_sddl(descriptor: &SecurityDescriptor) -> SecurityInformation {
     let sddl = descriptor.as_sddl();
     let mut information = SecurityInformation::empty();
-    if sddl.contains("O:") {
-        information |= SecurityInformation::OWNER;
-    }
-    if sddl.contains("G:") {
-        information |= SecurityInformation::GROUP;
-    }
-    if sddl.contains("D:") {
-        information |= SecurityInformation::DACL;
-    }
-    if sddl.contains("S:") {
-        information |= SecurityInformation::SACL;
+    let mut depth = 0_usize;
+    let mut quoted = false;
+    let mut escaped = false;
+    for (index, character) in sddl.char_indices() {
+        if quoted {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                quoted = false;
+            }
+            continue;
+        }
+        match character {
+            '"' => quoted = true,
+            '(' => depth += 1,
+            ')' => depth = depth.saturating_sub(1),
+            _ if depth == 0 && sddl.as_bytes().get(index + 1) == Some(&b':') => {
+                information |= match character {
+                    'O' => SecurityInformation::OWNER,
+                    'G' => SecurityInformation::GROUP,
+                    'D' => SecurityInformation::DACL,
+                    'S' => SecurityInformation::SACL,
+                    _ => SecurityInformation::empty(),
+                };
+            }
+            _ => {}
+        }
     }
     if information.is_empty() {
         SecurityInformation::DACL

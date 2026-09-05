@@ -353,6 +353,22 @@ mod tests {
     use crate::FolderPath;
 
     #[test]
+    fn yaml_preserves_every_control_scalar_and_unicode_line_separator() {
+        for code in (0..=0x9f).chain([0x2028, 0x2029, 0xfeff]) {
+            let character = char::from_u32(code).expect("valid scalar fixture");
+            let value = format!("before{character}after");
+            let manifest =
+                TaskManifest::new(Uuid::nil(), value, "\\Tests".parse().expect("namespace"));
+            let output = manifest
+                .to_string(DocumentFormat::Yaml)
+                .expect("YAML output");
+            let actual = TaskManifest::from_slice(output.as_bytes(), DocumentFormat::Yaml)
+                .expect("YAML input");
+            assert_eq!(actual, manifest, "Unicode scalar U+{code:04X}");
+        }
+    }
+
+    #[test]
     fn yaml_quotes_ambiguous_scalars_and_preserves_nested_manifest_values() {
         use crate::{
             manifest::ManagedTask,

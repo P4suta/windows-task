@@ -2,7 +2,7 @@
 
 Recorded on 2026-09-05, Windows x64, Rust 1.85.0. The local runs below preceded the commit;
 each run records the base revision and working-tree status. Paths below are
-relative to `target/verification/`. This is local evidence, not a claim that the
+relative to `target/verification/`. This is local evidence, not a claim that
 every GitHub workflow has executed successfully. The PR evidence below records
 the subsequent hosted checks separately.
 
@@ -58,6 +58,28 @@ case plus nested strings, control characters and whitespace; output now uses
 quoted YAML 1.2 scalars. The original fuzz run failed and must not be described
 as a successful 20-minute run. The expanded release DLL fixture also passed
 concurrent progress/completion and a failed-then-retried completion callback.
+
+On revision `4fb60d5`, CI run `33958785251` passed both complete jobs, including
+native mutation tests and extracted-package consumers. Linux measured **72.10%
+regions / 75.03% lines**; Windows measured **62.28% regions / 67.55% lines**.
+Commitlint and CodeQL passed. Extended run `33958785263` passed 9,698,471 guided
+fuzz executions in 1,201 seconds, Miri and native resource checks. Its mutation
+run improved to 144 caught, 38 missed and 23 unviable; that job still failed.
+Subsequent tests address the remaining non-equivalent permission/observation
+cases. The native `inspect` and `plan_live` mutants are both caught by real
+Windows tests in `pr5-native-wrapper-mutants-exact/mutants.out/` (not counted
+as Linux execution). The first native mutation attempt failed before testing
+because copying ignored caches exhausted disk space; its logs are retained.
+
+Further regressions exposed and corrected three recovery boundaries: stopping
+a new task during compensation must remain irreversible, restoring a newly
+created folder must include its observed SACL, and conditional ACE text must
+not be interpreted as top-level security sections. First failures are in
+`pr5-compensation-stop-first.log`, `pr5-mutation-final-first.log` and
+`pr5-conditional-acl-first.log`. Updated tests and Clippy passed locally.
+The local shared CI run `a61ff5d8-1839-484c-b92c-d7de3557108e` and package run
+`51afe66e-f556-4361-9541-52bda829bb0b` also passed; their environment files record
+the revision/working state at collection, before the later ACL corrections.
 
 ## Completed local checks
 
@@ -141,9 +163,9 @@ cleanup touches test artifacts outside its instrumented build directory.
 The complete seven-phase acceptance criteria are **not yet fully verified**.
 Do not describe this report as certification of every listed failure scenario.
 
-- Finish the full Windows workflow after the successful hosted SYSTEM execution
-  fixture. The local account can register per-user tasks but SYSTEM registration
-  failed with access denied. The fixture restores the original history-enabled
+- Verify the final recovery corrections through the full Windows workflow. The
+  previous revision passed, including hosted SYSTEM execution; local SYSTEM
+  registration is denied. The fixture restores the original history-enabled
   setting and records cleanup failures.
 - Extend native Event Log acceptance tests for actual provider log clearing,
   retention and stale-bookmark errors. The shared production page and delivery
@@ -153,9 +175,9 @@ Do not describe this report as certification of every listed failure scenario.
   completion notification failures still need acceptance coverage. Startup
   allocation/initialization failures and constructor panic are now injected
   through private test boundaries; the release fixture covers lifecycle modes.
-- Rerun guided fuzzing after the YAML fix and inspect remaining missed mutants.
-  Miri passed on the hosted Linux runner. Local fixed-seed replay is not a
-  replacement for guided fuzzing. Direct MSVC libFuzzer linking failed
+- Inspect remaining missed mutants after the latest recovery tests. Guided
+  fuzzing after the YAML fix and Miri passed on the hosted Linux runner. Local
+  fixed-seed replay is not a replacement. Direct MSVC libFuzzer linking failed
   (`fuzz-smoke-first.log`); hosted fuzzing runs on Linux.
 - Verify remote authentication, password-backed restoration and ARM64 execution
   on dedicated hosts. ARM64 compilation passed; ARM64 execution did not run.

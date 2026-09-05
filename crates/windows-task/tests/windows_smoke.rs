@@ -317,6 +317,29 @@ fn isolated_apply_has_no_second_diff() -> windows_task::Result<()> {
                 "first native apply was not successful",
             ));
         }
+        let observed = windows_task::reconcile::inspect(&blocking, &manifest)?;
+        if !observed
+            .tasks
+            .iter()
+            .any(|task| task.path == path && task.owned)
+        {
+            return Err(Error::new(
+                ErrorKind::Conflict,
+                "native inspection lost the registered owned task",
+            ));
+        }
+        let mut changed = manifest.clone();
+        changed.tasks[0].definition.registration.description = Some("planned update only".into());
+        let planned = windows_task::reconcile::plan_live(&blocking, &changed, Default::default())?;
+        if planned.changes.len() != 1
+            || planned.changes[0].change
+                != windows_task::reconcile::Change::UpdateTask(path.clone())
+        {
+            return Err(Error::new(
+                ErrorKind::Conflict,
+                "native dry run lost the requested definition change",
+            ));
+        }
         let second = apply(&blocking, &manifest, ApplyOptions::default())
             .map_err(|failure| failure.cause)?;
         if !second.plan.is_empty() {
