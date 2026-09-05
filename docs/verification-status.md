@@ -75,6 +75,24 @@ false remains significant and a conflict reports the static field and boolean
 values. A shared-backend regression preserves the unconfirmed task, and the local
 default-setting native apply/idempotence test passes. Password recovery still
 requires a passing hosted run after this correction.
+That correction is now verified in hosted run `33974193503`: all three complete
+jobs (Linux, Windows x64 and ARM64) passed, including native suites and package consumers.
+its native test reported `Authentication`, native code `-2147023570`, one applied
+change, one restored change and zero unresolved changes. Artifacts record the
+native `aarch64` architecture and merge-candidate revision `26938ef`, distinct
+from source `b29c43a`. Local committed-source CI
+`c8db71b6-38e3-4d0c-956b-bd045b367e44` passed all 26 commands and package run
+`6ea07048-72ea-4b97-8fbe-d6ff56e40cf6` passed all 10 commands. Extended native
+resource verification passed 10,000 iterations with growth inside every limit.
+Coverage measured 72.64% regions / 75.34% lines on Linux and 64.28% regions /
+69.67% lines on Windows. Mutation run `33974193500` caught 187, missed the same
+six classified cases and found 24 compile-invalid cases, with no timeouts.
+Fuzzing and Miri remain recorded in their own run artifacts; do not infer their
+results from native-suite success.
+
+Storage cleanup is recorded in `cache-cleanup-20260905.json`: 12 obsolete
+consumer/CLI compiler-cache directories, totaling 5,393,587,987 bytes, were
+removed. Logs, metadata, package archives, source and reproducers were retained.
 The notification trace assertion first failed because native progress dispatch
 had no reporter parent span (`native-notification-trace-first.log`). Passing
 the allowlisted operation context with each notification fixes the gap;
@@ -256,9 +274,9 @@ Do not describe this report as certification of every listed failure scenario.
   the completed run are classified above. Guided fuzzing and Miri passed. Local
   fixed-seed replay is not a replacement. Direct MSVC libFuzzer linking failed
   (`fuzz-smoke-first.log`); hosted fuzzing runs on Linux.
-- Verify password-backed restoration with the new disposable-account fixture.
-  Remote authentication and ARM64 execution need dedicated hosts. ARM64
-  compilation passed; ARM64 execution did not run.
+- Password-backed restoration and ARM64 native/package execution now pass on
+  disposable hosted runners. Remote host/domain authentication still needs an
+  independently configured environment; local-account results do not prove it.
 - Expand measured native coverage and executable end-to-end usage scenarios as
   these environments become available. Keep unexecuted scenarios distinct from
   passed commands and preserve every first-failure artifact.
