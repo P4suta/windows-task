@@ -491,10 +491,9 @@ pub mod __native {
         data: Option<String>,
         control: HandlerControl,
     ) {
-        let stream = ManuallyDrop::new(unsafe { IStream::from_raw(stream_raw as *mut c_void) });
-        let Ok(status) =
-            (unsafe { CoGetInterfaceAndReleaseStream::<_, ITaskHandlerStatus>(&*stream) })
-        else {
+        let Ok(status) = unmarshal_status(stream_raw) else {
+            // There is no usable notification interface. The failed unmarshal
+            // trace retains the native code; completion remains unconfirmed.
             return;
         };
         let (sender, receiver) = mpsc::channel();
@@ -587,6 +586,22 @@ pub mod __native {
         {
             completed.store(false, Ordering::Release);
         }
+    }
+
+    fn unmarshal_status(stream_raw: usize) -> crate::Result<ITaskHandlerStatus> {
+        let stream = ManuallyDrop::new(unsafe { IStream::from_raw(stream_raw as *mut c_void) });
+        crate::observe::Operation::new("handler.unmarshal_status").run(|| {
+            #[cfg(test)]
+            if take_test_failure(5) {
+                // Request a genuinely unsupported interface to exercise the OS
+                // failure and its stream/reference cleanup, not a fabricated error.
+                return unsafe { CoGetInterfaceAndReleaseStream::<_, IClassFactory>(&*stream) }
+                    .and_then(|interface| interface.cast::<ITaskHandlerStatus>())
+                    .map_err(|error| status_error("unmarshal handler status", error));
+            }
+            unsafe { CoGetInterfaceAndReleaseStream::<_, ITaskHandlerStatus>(&*stream) }
+                .map_err(|error| status_error("unmarshal handler status", error))
+        })
     }
 
     fn notify_terminal_completed(status: &ITaskHandlerStatus, code: HRESULT) -> crate::Result<()> {
@@ -780,6 +795,74 @@ pub mod __native {
             fail_update: bool,
             fail_complete_once: AtomicBool,
         }
+
+        static FAILURE_FIXTURE: Mutex<()> = Mutex::new(());
+
+        #[cfg(feature = "tracing")]
+        #[derive(Clone)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+
+        #[cfg(feature = "tracing")]
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("trace buffer")
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        #[cfg(feature = "tracing")]
+        #[test]
+        fn unmarshal_failure_is_traced_and_releases_the_native_packet() {
+            let _serial = FAILURE_FIXTURE.lock().expect("native failure fixture");
+            let _apartment = ComApartment::initialize().expect("test apartment");
+            let (completed, _receiver) = mpsc::channel();
+            let progress = Arc::new(Mutex::new(Vec::new()));
+            let status: ITaskHandlerStatus = Status {
+                completed,
+                progress: Arc::clone(&progress),
+                fail_update: false,
+                fail_complete_once: AtomicBool::new(false),
+            }
+            .into();
+            let stream =
+                unsafe { CoMarshalInterThreadInterfaceInStream(&ITaskHandlerStatus::IID, &status) }
+                    .expect("marshal status");
+            let bytes = Arc::new(Mutex::new(Vec::new()));
+            let writer = Capture(Arc::clone(&bytes));
+            let subscriber = tracing_subscriber::fmt()
+                .json()
+                .with_max_level(tracing::Level::TRACE)
+                .with_writer(move || writer.clone())
+                .finish();
+            TEST_FAILURE.store(5, Ordering::Release);
+            let error = tracing::subscriber::with_default(subscriber, || {
+                unmarshal_status(stream.into_raw() as usize).expect_err("unsupported interface")
+            });
+            assert_eq!(
+                error.native_code(),
+                Some(windows::Win32::Foundation::E_NOINTERFACE.0)
+            );
+            assert_eq!(TEST_FAILURE.load(Ordering::Acquire), 0);
+            drop(status);
+            assert_eq!(
+                Arc::strong_count(&progress),
+                1,
+                "failed unmarshal released the packet reference"
+            );
+            let log =
+                String::from_utf8(bytes.lock().expect("trace buffer").clone()).expect("UTF8 trace");
+            assert!(
+                log.contains("handler.unmarshal_status")
+                    && log.contains("\"native_code\":-2147467262"),
+                "unconfirmed notification interface must leave classified trace evidence: {log}"
+            );
+        }
         impl ITaskHandlerStatus_Impl for Status_Impl {
             fn UpdateStatus(&self, percent: i16, _: &BSTR) -> windows::core::Result<()> {
                 if self.fail_update {
@@ -824,6 +907,8 @@ pub mod __native {
 
         #[test]
         fn startup_failures_and_constructor_panic_release_native_lifetimes() {
+            let _serial = FAILURE_FIXTURE.lock().expect("native failure fixture");
+            static USER_RUNS: AtomicUsize = AtomicUsize::new(0);
             struct Handler;
             impl Default for Handler {
                 fn default() -> Self {
@@ -833,11 +918,13 @@ pub mod __native {
             }
             impl TaskHandler for Handler {
                 fn run(self, _: HandlerContext) -> crate::Result<()> {
+                    USER_RUNS.fetch_add(1, Ordering::AcqRel);
                     Ok(())
                 }
             }
             let _apartment = ComApartment::initialize().expect("test apartment");
-            for stage in [1, 2, 3, 4, 6] {
+            for stage in [1, 2, 3, 4, 5, 6] {
+                USER_RUNS.store(0, Ordering::Release);
                 let handler: ITaskHandler = NativeTaskHandler::<Handler>::new().into();
                 let (completed, receiver) = mpsc::channel();
                 let progress = Arc::new(Mutex::new(Vec::new()));
@@ -851,17 +938,7 @@ pub mod __native {
                 let services: IUnknown = status.cast().expect("status identity");
                 TEST_FAILURE.store(stage, Ordering::Release);
                 let started = unsafe { handler.Start(&services, &BSTR::new()) };
-                if matches!(stage, 3 | 6) {
-                    started.expect("native worker started");
-                    assert!(
-                        receiver
-                            .recv_timeout(Duration::from_secs(5))
-                            .expect("failure notification")
-                            .is_err()
-                    );
-                } else {
-                    assert!(started.is_err(), "startup stage {stage}");
-                }
+                assert_failed_start(stage, started, &receiver);
                 assert_eq!(
                     TEST_FAILURE.load(Ordering::Acquire),
                     0,
@@ -898,6 +975,44 @@ pub mod __native {
                 );
                 assert_eq!(ACTIVE_WORKERS.load(Ordering::Acquire), 0);
                 assert_eq!(ACTIVE_REPORTERS.load(Ordering::Acquire), 0);
+                assert_eq!(
+                    USER_RUNS.load(Ordering::Acquire),
+                    1,
+                    "only the healthy restart ran user code"
+                );
+                assert!(receiver.try_recv().is_err(), "no extra completion callback");
+            }
+        }
+
+        fn assert_failed_start(
+            stage: u8,
+            started: windows::core::Result<()>,
+            receiver: &mpsc::Receiver<HRESULT>,
+        ) {
+            if matches!(stage, 3 | 6) {
+                started.expect("native worker started");
+                assert!(
+                    receiver
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("failure notification")
+                        .is_err()
+                );
+            } else if stage == 5 {
+                started.expect("packet accepted before asynchronous unmarshal");
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while TEST_FAILURE.load(Ordering::Acquire) != 0 {
+                    assert!(
+                        Instant::now() < deadline,
+                        "unmarshal fault was not exercised"
+                    );
+                    thread::yield_now();
+                }
+                assert!(
+                    receiver.try_recv().is_err(),
+                    "failed unmarshal cannot confirm completion"
+                );
+            } else {
+                assert!(started.is_err(), "startup stage {stage}");
             }
         }
 

@@ -28,6 +28,8 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 
 ### Fixed
 
+- Failed handler status unmarshalling now retains classified trace evidence;
+  native failure tests verify packet release, counters and a healthy restart.
 - Apply reports distinguish preflight failures from successful empty plans.
 - Automatic handler completion retries one failed notification and retains an
   unconfirmed state when both attempts fail.
