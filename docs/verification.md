@@ -17,11 +17,14 @@ while logs, source inputs and actual `.crate` archives are retained.
 
 CI caches Cargo dependency downloads, not workspace build directories or installed
 binaries. Each runner builds and verifies from its own fresh `target` directory.
-The `v1-cargo-downloads` prefix prevents fallback to earlier caches that included
-old verification runs. Main CI `33976700588` reproduced stale test/package paths
-being restored by the old cache and reported `ENOENT` during cache cleanup even
-though the tests passed. This cache boundary keeps those diagnostics and old
-verification state out of subsequent runs; actual evidence remains in artifacts.
+An explicit `actions/cache` path list includes only `~/.cargo/registry/index`,
+`~/.cargo/registry/cache` and `~/.cargo/git/db`. The `v2-cargo-downloads` prefix
+prevents fallback to earlier cache formats. Main CI `33976700588` reproduced
+stale test/package paths being restored by the old cache and reported `ENOENT`
+during cache cleanup even though the tests passed. Disabling target caching
+alone still ran that cleanup (`33977518489`); the explicit path cache avoids
+walking or modifying workspace verification state. Actual evidence remains in
+artifacts, and `CARGO_INCREMENTAL=0` retains the previous CI build behavior.
 
 Run coverage after CI has finished. The coverage tool cleans some shared test
 artifacts, so running it concurrently with trybuild can collide with loaded DLLs

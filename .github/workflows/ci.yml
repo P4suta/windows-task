@@ -21,6 +21,7 @@ permissions:
   contents: read
 
 env:
+  CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: "1"
 
@@ -43,11 +44,15 @@ jobs:
           install_args: >-
             node just github:crate-ci/typos actionlint yamllint
             npm:markdownlint-cli2 github:EmbarkStudios/cargo-deny ripgrep
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v6
         with:
-          prefix-key: v1-cargo-downloads
-          cache-targets: "false"
-          cache-bin: "false"
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: v2-cargo-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            v2-cargo-downloads-${{ runner.os }}-${{ runner.arch }}-
       - name: Install Windows Rust targets
         run: >-
           rustup target add --toolchain 1.85.0
@@ -77,11 +82,15 @@ jobs:
         run: >-
           rustup toolchain install 1.85.0 --profile minimal
           --component clippy --component rustfmt --component llvm-tools-preview
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v6
         with:
-          prefix-key: v1-cargo-downloads
-          cache-targets: "false"
-          cache-bin: "false"
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: v2-cargo-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            v2-cargo-downloads-${{ runner.os }}-${{ runner.arch }}-
       - uses: jdx/mise-action@v4
         with:
           install_args: >-
@@ -133,11 +142,15 @@ jobs:
             throw 'ARM64 execution requires an ARM64 compiler host'
           }
           if ($env:CARGO_BUILD_TARGET) { throw 'Unexpected target override on native ARM64' }
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v6
         with:
-          prefix-key: v1-cargo-downloads
-          cache-targets: "false"
-          cache-bin: "false"
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: v2-cargo-downloads-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            v2-cargo-downloads-${{ runner.os }}-${{ runner.arch }}-
       - name: Execute all suites on ARM64
         env:
           WINDOWS_TASK_MUTATION_TESTS: "1"
