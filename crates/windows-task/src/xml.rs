@@ -174,7 +174,7 @@ pub fn to_utf16le(definition: &TaskDefinition) -> Result<Vec<u8>> {
 /// Removes an optional XML declaration before text is passed through a UTF-16
 /// `BSTR`. The COM API already carries decoded characters, so retaining a byte
 /// encoding declaration can make Task Scheduler reject otherwise valid XML.
-#[cfg(any(windows, test))]
+#[cfg(any(test, all(windows, feature = "client")))]
 pub(crate) fn without_declaration(text: &str) -> &str {
     text.strip_prefix("<?xml")
         .and_then(|rest| rest.find("?>").map(|end| &rest[end + 2..]))
