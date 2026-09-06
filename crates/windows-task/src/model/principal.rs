@@ -156,3 +156,80 @@ impl Default for Principal {
         }
     }
 }
+
+impl Principal {
+    /// Runs the task as one of the built-in service accounts.
+    #[must_use]
+    pub fn service_account(account: ServiceAccount) -> Self {
+        Self {
+            identity: PrincipalIdentity::ServiceAccount(account),
+            logon_type: LogonType::ServiceAccount,
+            ..Self::default()
+        }
+    }
+
+    /// Runs the task as a user using that user's existing interactive token.
+    /// The task only runs while the user is logged on and no password is stored.
+    #[must_use]
+    pub fn user(name: impl Into<String>) -> Self {
+        Self {
+            identity: PrincipalIdentity::User(name.into()),
+            logon_type: LogonType::InteractiveToken,
+            ..Self::default()
+        }
+    }
+
+    /// Runs the task as a user whether or not that user is logged on. Task
+    /// Scheduler stores the password, which is supplied separately at
+    /// registration time and never through the definition.
+    #[must_use]
+    pub fn user_with_password(name: impl Into<String>) -> Self {
+        Self {
+            identity: PrincipalIdentity::User(name.into()),
+            logon_type: LogonType::Password,
+            ..Self::default()
+        }
+    }
+
+    /// Runs the task as a user with a Service-for-User token, which needs no
+    /// stored password but grants no network or encrypted-file access.
+    #[must_use]
+    pub fn s4u(name: impl Into<String>) -> Self {
+        Self {
+            identity: PrincipalIdentity::User(name.into()),
+            logon_type: LogonType::S4u,
+            ..Self::default()
+        }
+    }
+
+    /// Activates the task for any member of a group.
+    #[must_use]
+    pub fn group(name: impl Into<String>) -> Self {
+        Self {
+            identity: PrincipalIdentity::Group(name.into()),
+            logon_type: LogonType::Group,
+            ..Self::default()
+        }
+    }
+
+    /// Sets the display name shown by Task Scheduler.
+    #[must_use]
+    pub fn display_name(mut self, display_name: impl Into<String>) -> Self {
+        self.display_name = Some(display_name.into());
+        self
+    }
+
+    /// Sets the requested UAC elevation level.
+    #[must_use]
+    pub fn run_level(mut self, run_level: RunLevel) -> Self {
+        self.run_level = run_level;
+        self
+    }
+
+    /// Requests one additional privilege in the task token.
+    #[must_use]
+    pub fn privilege(mut self, privilege: RequiredPrivilege) -> Self {
+        self.required_privileges.push(privilege);
+        self
+    }
+}

@@ -1,3 +1,4 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
 #![doc = include_str!("../README.md")]
 #![deny(unsafe_code)]
 
@@ -16,21 +17,27 @@ pub mod model;
 pub mod xml;
 
 #[cfg(feature = "recipes")]
+#[cfg_attr(docsrs, doc(cfg(feature = "recipes")))]
 pub mod schedule;
 
 #[cfg(feature = "serde")]
+#[cfg_attr(docsrs, doc(cfg(feature = "serde")))]
 pub mod manifest;
 
 #[cfg(feature = "client")]
+#[cfg_attr(docsrs, doc(cfg(feature = "client")))]
 pub mod client;
 
 #[cfg(feature = "history")]
+#[cfg_attr(docsrs, doc(cfg(feature = "history")))]
 pub mod history;
 
 #[cfg(feature = "reconcile")]
+#[cfg_attr(docsrs, doc(cfg(feature = "reconcile")))]
 pub mod reconcile;
 
 #[cfg(feature = "handler")]
+#[cfg_attr(docsrs, doc(cfg(feature = "handler")))]
 pub mod handler;
 
 pub use credentials::{Credential, Credentials, Password};
@@ -42,6 +49,7 @@ pub use validation::{
 };
 
 #[cfg(feature = "handler")]
+#[cfg_attr(docsrs, doc(cfg(feature = "handler")))]
 pub use windows_task_macros::handler;
 
 /// The maximum number of actions accepted by Task Scheduler 2.0.

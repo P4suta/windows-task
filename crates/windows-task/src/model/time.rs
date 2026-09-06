@@ -57,6 +57,36 @@ impl TaskDateTime {
         })
     }
 
+    /// Creates a boundary that follows the target computer's wall clock,
+    /// including its DST transitions. This is the basis Task Scheduler
+    /// applies to a timestamp written without a UTC offset.
+    pub fn wall_clock(
+        year: i16,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+    ) -> Result<Self, ParseTaskDateTimeError> {
+        Self::parse(civil_text(year, month, day, hour, minute, second))
+    }
+
+    /// Creates a boundary at a fixed UTC instant, which does not shift with
+    /// the target computer's DST transitions.
+    pub fn utc(
+        year: i16,
+        month: u8,
+        day: u8,
+        hour: u8,
+        minute: u8,
+        second: u8,
+    ) -> Result<Self, ParseTaskDateTimeError> {
+        Self::parse(format!(
+            "{}Z",
+            civil_text(year, month, day, hour, minute, second)
+        ))
+    }
+
     /// Returns the scheduler-compatible ISO-8601 text.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -119,6 +149,24 @@ impl TaskDuration {
     #[must_use]
     pub const fn from_secs(seconds: u64) -> Self {
         Self(Duration::from_secs(seconds))
+    }
+
+    /// Constructs a duration from whole minutes.
+    #[must_use]
+    pub const fn from_mins(minutes: u64) -> Self {
+        Self(Duration::from_secs(minutes.saturating_mul(60)))
+    }
+
+    /// Constructs a duration from whole hours.
+    #[must_use]
+    pub const fn from_hours(hours: u64) -> Self {
+        Self(Duration::from_secs(hours.saturating_mul(3_600)))
+    }
+
+    /// Constructs a duration from whole days.
+    #[must_use]
+    pub const fn from_days(days: u64) -> Self {
+        Self(Duration::from_secs(days.saturating_mul(86_400)))
     }
 
     /// Constructs a duration from a standard duration.
@@ -223,6 +271,10 @@ impl Default for TaskLimit {
     fn default() -> Self {
         Self::Finite(TaskDuration::from_secs(72 * 60 * 60))
     }
+}
+
+fn civil_text(year: i16, month: u8, day: u8, hour: u8, minute: u8, second: u8) -> String {
+    format!("{year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}:{second:02}")
 }
 
 fn numeric_offset_start(value: &str) -> Option<usize> {

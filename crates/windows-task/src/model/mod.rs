@@ -1,6 +1,7 @@
 //! Portable, fully owned Task Scheduler domain model.
 
 mod action;
+mod builder;
 mod principal;
 mod settings;
 mod time;
@@ -17,6 +18,7 @@ pub use action::{
     Action, ComHandlerAction, EmailAction, EmailHeader, ExecAction, ShowMessageAction,
     UnknownAction, expand_action_templates, quote_windows_argument,
 };
+pub use builder::TaskBuilder;
 pub use principal::{
     InvalidPrivilege, LogonType, Principal, PrincipalIdentity, ProcessTokenSidType,
     RequiredPrivilege, RunLevel, ServiceAccount,
@@ -428,6 +430,16 @@ impl TaskDefinition {
         }
     }
 
+    /// Starts a fluent builder for a definition with one action.
+    ///
+    /// Unlike [`TaskDefinition::new`], the builder applies the native
+    /// action/trigger limits and full portable validation before returning a
+    /// definition. See [`TaskBuilder`].
+    #[must_use]
+    pub fn builder(action: impl Into<Action>) -> TaskBuilder {
+        TaskBuilder::new(action.into())
+    }
+
     /// Performs complete portable and cross-field validation.
     #[must_use]
     pub fn validate(&self) -> ValidationReport {
@@ -489,5 +501,170 @@ mod security_tests {
         ] {
             assert!(!expected.access_equivalent(&descriptor(other)));
         }
+    }
+}
+
+#[cfg(all(test, feature = "serde"))]
+mod default_parity_tests {
+    use super::{
+        Action, EmailAction, EventTrigger, ExecAction, MaintenanceSettings, Month,
+        MonthlyDowTrigger, MonthlyTrigger, Repetition, TaskDateTime, TaskDefinition, TaskDuration,
+        WeekOfMonth, Weekday,
+    };
+
+    // Fields that Task XML treats as optional carry a serde `default` so a
+    // manifest need not spell them out. None of the owning structs implements
+    // `Default`, so each resolves through its own field type instead. That the
+    // two paths agree is asserted here rather than assumed, because the next
+    // field added here will not inherit a struct default to check against.
+    const OPTIONAL: &[(&str, &str)] = &[
+        ("hide_window", "HideAppWindow"),
+        ("stop_at_duration_end", "StopAtDurationEnd"),
+        ("run_on_last_day", "RunOnLastDayOfMonth"),
+        ("run_on_last_week", "RunOnLastWeekOfMonth"),
+        ("exclusive", "Exclusive"),
+    ];
+
+    fn every_optional_field_at_its_default() -> TaskDefinition {
+        let anchor = TaskDateTime::wall_clock(2026, 9, 5, 6, 0, 0).expect("fixed anchor");
+        let mut definition = TaskDefinition::new(Action::Exec(ExecAction::new("agent.exe")));
+        definition
+            .actions
+            .push(Action::Email(EmailAction {
+                server: "smtp.example.invalid".into(),
+                ..EmailAction::default()
+            }))
+            .expect("second action");
+
+        let mut event = EventTrigger::new("<QueryList/>");
+        event.common.repetition = Some(Repetition {
+            interval: TaskDuration::from_mins(15),
+            duration: None,
+            stop_at_duration_end: false,
+        });
+        definition
+            .triggers
+            .push(event.into())
+            .expect("event trigger");
+        definition
+            .triggers
+            .push(MonthlyTrigger::new(anchor.clone(), [1_u8], [Month::January]).into())
+            .expect("monthly trigger");
+        definition
+            .triggers
+            .push(
+                MonthlyDowTrigger::new(
+                    anchor,
+                    [WeekOfMonth::First],
+                    [Weekday::Monday],
+                    [Month::January],
+                )
+                .into(),
+            )
+            .expect("monthly day-of-week trigger");
+        definition.settings.maintenance = Some(MaintenanceSettings {
+            period: TaskDuration::from_days(1),
+            deadline: TaskDuration::from_days(7),
+            exclusive: false,
+        });
+        definition
+    }
+
+    // A document that omits one of these must mean the same thing whether it is
+    // Task XML or a manifest.
+    #[test]
+    fn optional_native_elements_resolve_identically_on_both_input_paths() {
+        let definition = every_optional_field_at_its_default();
+
+        let xml = crate::xml::to_string(&definition).expect("canonical XML");
+        let written: Vec<String> = OPTIONAL
+            .iter()
+            .map(|(_, element)| format!("<{element}>false</{element}>"))
+            .filter(|element| xml.contains(element))
+            .collect();
+        let without_elements = written.iter().fold(xml.clone(), |document, element| {
+            document.replace(element, "")
+        });
+        // `HideAppWindow` is the one the writer already omits when false; the
+        // other four are written explicitly and are stripped here.
+        assert_eq!(
+            written.len(),
+            OPTIONAL.len() - 1,
+            "the writer emits every optional element except HideAppWindow"
+        );
+        assert!(
+            !xml.contains("HideAppWindow"),
+            "the writer omits HideAppWindow when it is false"
+        );
+        assert_eq!(
+            crate::xml::from_bytes(without_elements.as_bytes()).expect("XML without the elements"),
+            definition,
+            "an absent Task XML element must restore the modelled default"
+        );
+
+        // A manifest, by contrast, always writes every value, so each key is
+        // present before it is stripped.
+        let document = toml::to_string(&definition).expect("canonical TOML");
+        let mut without_keys = String::new();
+        let mut omitted = 0_usize;
+        for line in document.lines() {
+            if OPTIONAL
+                .iter()
+                .any(|(key, _)| line.starts_with(&format!("{key} = ")))
+            {
+                omitted += 1;
+                continue;
+            }
+            without_keys.push_str(line);
+            without_keys.push('\n');
+        }
+        assert_eq!(
+            omitted,
+            OPTIONAL.len(),
+            "a manifest writes every optional key"
+        );
+        assert_eq!(
+            toml::from_str::<TaskDefinition>(&without_keys).expect("manifest without the keys"),
+            definition,
+            "an omitted manifest key must resolve to the same value"
+        );
+
+        // Collections the XML writer omits when empty stay empty on both paths.
+        for absent in ["ValueQueries", "Attachments", "HeaderFields"] {
+            assert!(
+                !xml.contains(absent),
+                "the writer omits an empty collection entirely"
+            );
+        }
+        assert_eq!(
+            crate::xml::from_bytes(xml.as_bytes()).expect("round trip"),
+            definition
+        );
+    }
+
+    // The one field the writer omits when false must still survive when true.
+    #[test]
+    fn a_non_default_optional_value_is_written_and_read_back() {
+        let mut definition = TaskDefinition::new(Action::Exec(ExecAction {
+            hide_window: true,
+            ..ExecAction::new("agent.exe")
+        }));
+        definition.settings.maintenance = Some(MaintenanceSettings {
+            period: TaskDuration::from_days(1),
+            deadline: TaskDuration::from_days(7),
+            exclusive: true,
+        });
+        let xml = crate::xml::to_string(&definition).expect("canonical XML");
+        assert!(xml.contains("<HideAppWindow>true</HideAppWindow>"));
+        assert!(xml.contains("<Exclusive>true</Exclusive>"));
+        assert_eq!(
+            crate::xml::from_bytes(xml.as_bytes()).expect("round trip"),
+            definition
+        );
+        let document = toml::to_string(&definition).expect("canonical TOML");
+        assert_eq!(
+            toml::from_str::<TaskDefinition>(&document).expect("manifest round trip"),
+            definition
+        );
     }
 }

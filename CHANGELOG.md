@@ -10,6 +10,21 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 
 ### Added
 
+- A fluent `TaskDefinition::builder` that applies the native action/trigger
+  limits and the full portable validation, returning every diagnostic on the
+  error instead of a bare kind.
+- Constructors for every known trigger kind and for principals, so an identity
+  and its logon type cannot disagree, and triggers can be built without the
+  `recipes` feature.
+- `From` conversions from every model, path, schedule and collection failure
+  into `Error`, so `?` carries construction, parsing and native calls together.
+- `Display` for `Diagnostic`, `ValidationReport` and `DiagnosticReport`, plus
+  `DiagnosticCode::as_str`/`DiagnosticLevel::as_str` without the `serde` feature.
+- Typed `TaskDateTime::wall_clock`/`utc` and `TaskDuration::from_mins`/
+  `from_hours`/`from_days` constructors. Neither reads the clock, so the
+  recurrence basis stays explicit.
+- Feature badges on docs.rs, a checked-in minimal manifest example, and tests
+  that keep both example manifests and both READMEs verified.
 - Recorded verification suites, deterministic native-fault boundaries, compile
   contract tests, input fuzzing, and release DLL/packaged-consumer fixtures.
 - Optional structured tracing, connection-failure diagnostics, redacted CLI
@@ -31,6 +46,19 @@ Commit messages follow [Conventional Commits](https://www.conventionalcommits.or
 
 ### Fixed
 
+- A trigger built from `TriggerCommon::default()`, or read from a manifest that
+  omits `enabled`, is now enabled. Task XML has always treated an absent
+  `Enabled` element as enabled, so the same omission previously meant opposite
+  things depending on which input path a task came from. An explicit `false`
+  is unaffected.
+- Manifest fields that Task XML also treats as optional no longer have to be
+  written out: `hide_window`, `stop_at_duration_end`, `run_on_last_day`,
+  `run_on_last_week`, `value_queries`, `exclusive` and the email collections
+  take their documented defaults. Fields the schema requires stay required.
+- `default-features = false` builds again; the model/XML-only configuration the
+  README advertises failed on an unused internal helper.
+- The checked-in manifest example is regenerated from the current model and a
+  test now fails if it drifts from what the library writes.
 - Failed handler status unmarshalling now retains classified trace evidence;
   native failure tests verify packet release, counters and a healthy restart.
 - Apply reports distinguish preflight failures from successful empty plans.
