@@ -23,6 +23,7 @@ pub struct ExecAction {
     /// Optional working directory.
     pub working_directory: Option<String>,
     /// Requests a hidden window on scheduler versions that support it.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub hide_window: bool,
 }
 
@@ -121,8 +122,10 @@ pub struct EmailAction {
     /// Message body.
     pub body: Option<String>,
     /// Attachment paths.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub attachments: Vec<String>,
     /// Additional headers.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub headers: Vec<EmailHeader>,
 }
 
@@ -187,6 +190,36 @@ impl Action {
             Self::ShowMessage(action) => action.id.as_deref(),
             Self::Unknown(_) => None,
         }
+    }
+}
+
+impl From<ExecAction> for Action {
+    fn from(value: ExecAction) -> Self {
+        Self::Exec(value)
+    }
+}
+
+impl From<ComHandlerAction> for Action {
+    fn from(value: ComHandlerAction) -> Self {
+        Self::ComHandler(value)
+    }
+}
+
+impl From<EmailAction> for Action {
+    fn from(value: EmailAction) -> Self {
+        Self::Email(value)
+    }
+}
+
+impl From<ShowMessageAction> for Action {
+    fn from(value: ShowMessageAction) -> Self {
+        Self::ShowMessage(value)
+    }
+}
+
+impl From<UnknownAction> for Action {
+    fn from(value: UnknownAction) -> Self {
+        Self::Unknown(value)
     }
 }
 

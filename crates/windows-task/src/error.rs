@@ -185,3 +185,103 @@ impl std::error::Error for Error {}
 
 /// Result alias used by this crate.
 pub type Result<T> = std::result::Result<T, Error>;
+
+/// Converts a portable model or path failure into the crate's error type so a
+/// caller returning [`Result`] can use `?` on every construction step.
+macro_rules! from_model_error {
+    ($source:ty, $kind:expr) => {
+        impl From<$source> for Error {
+            fn from(error: $source) -> Self {
+                Self::new($kind, error.to_string())
+            }
+        }
+    };
+}
+
+from_model_error!(crate::ParsePathError, ErrorKind::InvalidPath);
+from_model_error!(
+    crate::model::ParseTaskDateTimeError,
+    ErrorKind::InvalidDefinition
+);
+from_model_error!(
+    crate::model::ParseTaskDurationError,
+    ErrorKind::InvalidDefinition
+);
+from_model_error!(
+    crate::model::CollectionLimitError,
+    ErrorKind::InvalidDefinition
+);
+from_model_error!(
+    crate::model::InvalidSecurityDescriptor,
+    ErrorKind::InvalidDefinition
+);
+from_model_error!(crate::model::InvalidPrivilege, ErrorKind::InvalidDefinition);
+
+#[cfg(feature = "recipes")]
+from_model_error!(crate::schedule::ScheduleError, ErrorKind::InvalidDefinition);
+
+#[cfg(test)]
+mod conversion_tests {
+    use super::{Error, ErrorKind};
+
+    #[test]
+    fn model_failures_convert_without_losing_their_classification() {
+        use crate::model::{
+            Action, Actions, InvalidSecurityDescriptor, RequiredPrivilege, SecurityDescriptor,
+            TaskDateTime, TaskDuration,
+        };
+
+        let path: Error = "relative"
+            .parse::<crate::TaskPath>()
+            .expect_err("relative path")
+            .into();
+        assert_eq!(path.kind(), ErrorKind::InvalidPath);
+        assert!(!path.message().is_empty());
+
+        let boundary: Error = TaskDateTime::parse("not-a-timestamp")
+            .expect_err("invalid boundary")
+            .into();
+        assert_eq!(boundary.kind(), ErrorKind::InvalidDefinition);
+
+        let duration: Error = TaskDuration::parse("P1Y")
+            .expect_err("calendar unit")
+            .into();
+        assert_eq!(duration.kind(), ErrorKind::InvalidDefinition);
+
+        let overflow: Error = Actions::new(vec![
+            Action::Exec(crate::model::ExecAction::new(
+                "fixture.exe"
+            ));
+            crate::MAX_ACTIONS + 1
+        ])
+        .expect_err("action limit")
+        .into();
+        assert_eq!(overflow.kind(), ErrorKind::InvalidDefinition);
+
+        let sddl: Error = SecurityDescriptor::from_sddl("")
+            .expect_err("empty SDDL")
+            .into();
+        assert_eq!(sddl.kind(), ErrorKind::InvalidDefinition);
+        assert_eq!(
+            Error::from(InvalidSecurityDescriptor).kind(),
+            ErrorKind::InvalidDefinition
+        );
+
+        let privilege: Error = RequiredPrivilege::new("NotAPrivilege")
+            .expect_err("invalid privilege name")
+            .into();
+        assert_eq!(privilege.kind(), ErrorKind::InvalidDefinition);
+    }
+
+    #[cfg(feature = "recipes")]
+    #[test]
+    fn schedule_failures_convert_to_invalid_definition() {
+        let error: Error = crate::schedule::every(
+            crate::model::TaskDateTime::parse("2026-09-05T06:00:00").expect("anchor"),
+            crate::model::TaskDuration::from_secs(0),
+        )
+        .expect_err("zero repetition")
+        .into();
+        assert_eq!(error.kind(), ErrorKind::InvalidDefinition);
+    }
+}

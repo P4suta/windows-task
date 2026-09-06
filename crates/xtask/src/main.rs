@@ -396,3 +396,78 @@ mod tests {
         run_process(ProcessCommand::new("rustc").arg("--version")).expect("successful process");
     }
 }
+
+#[cfg(test)]
+mod documentation_tests {
+    use std::path::PathBuf;
+
+    // The repository README is not part of any published package, so rustdoc
+    // never compiles it. Keeping its Rust blocks identical to the crate README
+    // makes `cargo test --doc` cover both, which is how a stale snippet gets
+    // caught instead of shipping to the project landing page.
+    const UNVERIFIABLE_BLOCKS: &[(&str, &str)] = &[(
+        "#[handler(clsid",
+        "needs the optional `handler` feature, which a default `cargo test --doc` does not enable",
+    )];
+
+    fn workspace_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+    }
+
+    fn rust_blocks(markdown: &str) -> Vec<String> {
+        let mut blocks = Vec::new();
+        let mut current: Option<String> = None;
+        for line in markdown.lines() {
+            match current.as_mut() {
+                Some(block) if line.trim_end() == "```" => blocks.push(std::mem::take(block)),
+                Some(block) => {
+                    block.push_str(line);
+                    block.push('\n');
+                    continue;
+                }
+                None if line.starts_with("```rust") => {
+                    current = Some(String::new());
+                    continue;
+                }
+                None => continue,
+            }
+            current = None;
+        }
+        assert!(current.is_none(), "an unterminated code fence");
+        blocks
+    }
+
+    #[test]
+    fn repository_readme_rust_blocks_are_covered_by_crate_doctests() {
+        let root = workspace_root();
+        let repository =
+            std::fs::read_to_string(root.join("README.md")).expect("repository README");
+        let crate_readme = std::fs::read_to_string(root.join("crates/windows-task/README.md"))
+            .expect("crate README");
+        let documented = rust_blocks(&crate_readme);
+        assert!(
+            documented.len() >= 3,
+            "the crate README should carry the verified examples"
+        );
+
+        for block in rust_blocks(&repository) {
+            if let Some((marker, reason)) = UNVERIFIABLE_BLOCKS
+                .iter()
+                .find(|(marker, _)| block.contains(marker))
+            {
+                assert!(
+                    !documented.contains(&block),
+                    "{marker:?} is now doctested; drop it from UNVERIFIABLE_BLOCKS ({reason})"
+                );
+                continue;
+            }
+            assert!(
+                documented.contains(&block),
+                "this repository README block is never compiled; copy it from \
+                 crates/windows-task/README.md so `cargo test --doc` covers it:\n{block}"
+            );
+        }
+    }
+}

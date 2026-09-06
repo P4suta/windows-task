@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, fmt};
 
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
@@ -121,7 +121,51 @@ impl Diagnostic {
     }
 }
 
+impl DiagnosticLevel {
+    /// Returns the lowercase severity name used in rendered output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Warning => "warning",
+            Self::Error => "error",
+        }
+    }
+}
+
+impl fmt::Display for DiagnosticLevel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 impl DiagnosticCode {
+    /// Returns the stable snake_case identifier for this code. It is available
+    /// without the `serde` feature so logs and messages can name a finding.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        match self {
+            Self::MissingAction => "missing_action",
+            Self::DuplicateId => "duplicate_id",
+            Self::EmptyValue => "empty_value",
+            Self::OutOfRange => "out_of_range",
+            Self::IncompleteTrigger => "incomplete_trigger",
+            Self::PrincipalLogonMismatch => "principal_logon_mismatch",
+            Self::PasswordRequired => "password_required",
+            Self::DeprecatedAction => "deprecated_action",
+            Self::SchemaTooOld => "schema_too_old",
+            Self::RegistrationTriggerSideEffect => "registration_trigger_side_effect",
+            Self::OpaqueExtension => "opaque_extension",
+            Self::UnsupportedCapability => "unsupported_capability",
+            Self::HistoryUnavailable => "history_unavailable",
+            Self::RemoteConnectivity => "remote_connectivity",
+            Self::InsufficientRights => "insufficient_rights",
+            Self::OwnershipConflict => "ownership_conflict",
+            Self::IrreversibleChange => "irreversible_change",
+            Self::Other(value) => value,
+        }
+    }
+
     fn remediation(&self) -> &'static str {
         match self {
             Self::MissingAction => "Add at least one Exec or COM handler action.",
@@ -217,6 +261,67 @@ impl DiagnosticReport {
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.level == DiagnosticLevel::Error)
+    }
+}
+
+impl fmt::Display for DiagnosticCode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl fmt::Display for Diagnostic {
+    /// Renders one finding as `level[code] path: message`, followed by an
+    /// indented remediation line when one is known.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{}[{}] {}: {}",
+            self.level, self.code, self.path, self.message
+        )?;
+        match &self.remediation {
+            Some(remediation) => write!(
+                formatter,
+                "
+  remediation: {remediation}"
+            ),
+            None => Ok(()),
+        }
+    }
+}
+
+fn write_findings(formatter: &mut fmt::Formatter<'_>, findings: &[Diagnostic]) -> fmt::Result {
+    if findings.is_empty() {
+        return formatter.write_str("no findings");
+    }
+    for (index, finding) in findings.iter().enumerate() {
+        if index > 0 {
+            formatter.write_str(
+                "
+",
+            )?;
+        }
+        write!(formatter, "{finding}")?;
+    }
+    Ok(())
+}
+
+impl fmt::Display for ValidationReport {
+    /// Renders every finding in model order, one per line.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write_findings(formatter, &self.diagnostics)
+    }
+}
+
+impl fmt::Display for DiagnosticReport {
+    /// Renders the inspected target followed by every check finding.
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        writeln!(
+            formatter,
+            "target: {}",
+            self.target.as_deref().unwrap_or("local")
+        )?;
+        write_findings(formatter, &self.diagnostics)
     }
 }
 
@@ -554,5 +659,53 @@ mod tests {
         definition.principal.logon_type = LogonType::Group;
         definition.principal.identity = PrincipalIdentity::User("someone".into());
         assert!(!definition.validate().is_valid());
+    }
+}
+
+#[cfg(test)]
+mod rendering_tests {
+    use super::{Diagnostic, DiagnosticCode, DiagnosticLevel, DiagnosticReport, ValidationReport};
+    use crate::model::{Action, ExecAction, TaskDefinition};
+
+    #[test]
+    fn a_report_renders_every_part_a_reader_needs_to_act() {
+        let report = TaskDefinition::new(Action::Exec(ExecAction::new(""))).validate();
+        let rendered = report.to_string();
+        assert!(rendered.contains("error[empty_value]"), "{rendered}");
+        assert!(rendered.contains("actions[0].command"), "{rendered}");
+        assert!(
+            rendered.contains("an exec command cannot be empty"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("  remediation: "), "{rendered}");
+        // One line per finding, plus one indented remediation line each.
+        assert_eq!(rendered.lines().count(), report.diagnostics.len() * 2);
+    }
+
+    #[test]
+    fn an_empty_report_says_so_instead_of_rendering_nothing() {
+        assert_eq!(ValidationReport::default().to_string(), "no findings");
+        assert_eq!(
+            DiagnosticReport::default().to_string(),
+            "target: local\nno findings"
+        );
+    }
+
+    #[test]
+    fn a_forward_compatible_code_keeps_its_own_identifier() {
+        let report = DiagnosticReport {
+            target: Some("SERVER".into()),
+            diagnostics: vec![Diagnostic {
+                level: DiagnosticLevel::Warning,
+                code: DiagnosticCode::Other("bundle_write_failed".into()),
+                path: "doctor.bundle".into(),
+                message: "the bundle directory is not writable".into(),
+                remediation: None,
+            }],
+        };
+        assert_eq!(
+            report.to_string(),
+            "target: SERVER\nwarning[bundle_write_failed] doctor.bundle: the bundle directory is not writable"
+        );
     }
 }

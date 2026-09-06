@@ -92,6 +92,7 @@ pub struct MaintenanceSettings {
     /// Deadline after the period begins.
     pub deadline: TaskDuration,
     /// Allows Windows to run outside automatic maintenance when needed.
+    #[cfg_attr(feature = "serde", serde(default))]
     pub exclusive: bool,
 }
 

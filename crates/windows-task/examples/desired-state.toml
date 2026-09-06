@@ -9,10 +9,16 @@ path = '\Acme\Heartbeat'
 
 [tasks.definition]
 schema_version = "v1_6"
-triggers = []
 extensions = []
 
 [tasks.definition.registration]
+description = "Reports agent liveness once a day."
+
+[[tasks.definition.triggers]]
+type = "daily"
+start_boundary = "2026-09-05T06:00:00"
+enabled = true
+days_interval = 1
 
 [tasks.definition.principal]
 id = "Author"
@@ -35,7 +41,7 @@ enabled = true
 priority = 7
 wake_to_run = false
 hidden = false
-use_unified_scheduling_engine = false
+use_unified_scheduling_engine = true
 disallow_start_on_remote_app_session = false
 volatile = false
 
@@ -45,6 +51,7 @@ finite = "P3D"
 [[tasks.definition.actions]]
 type = "exec"
 command = "acme-agent.exe"
+arguments = "--heartbeat"
 hide_window = false
 
 [tasks.credentials]

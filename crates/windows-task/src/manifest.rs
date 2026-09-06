@@ -441,3 +441,66 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod example_documents {
+    use super::{DocumentFormat, TaskManifest};
+    use crate::model::{Action, Principal, TaskSettings};
+
+    const FULL: &str = include_str!("../examples/desired-state.toml");
+    const MINIMAL: &str = include_str!("../examples/desired-state-minimal.toml");
+
+    fn parse(text: &str) -> TaskManifest {
+        TaskManifest::from_slice(text.as_bytes(), DocumentFormat::Toml)
+            .expect("a checked-in example must parse")
+    }
+
+    // The fully explicit document must stay byte-identical to what the library
+    // writes, so a changed default cannot leave a stale value in the document
+    // readers copy from.
+    #[test]
+    fn the_full_example_is_the_canonical_output_of_the_current_model() {
+        let manifest = parse(FULL);
+        assert_eq!(
+            manifest
+                .to_string(DocumentFormat::Toml)
+                .expect("canonical TOML"),
+            FULL,
+            "regenerate with: cargo run --example manifest --features serde"
+        );
+        let task = manifest.tasks.first().expect("one managed task");
+        assert_eq!(task.definition.settings, TaskSettings::default());
+        assert_eq!(task.definition.principal, Principal::default());
+        assert!(manifest.validate().is_valid());
+    }
+
+    // Every field the minimal document omits must resolve to the value the
+    // explicit document spells out. This is the contract that lets a reader
+    // delete a line without changing what the task does.
+    #[test]
+    fn the_minimal_example_resolves_to_the_documented_defaults() {
+        let minimal = parse(MINIMAL);
+        let full = parse(FULL);
+        let minimal_task = minimal.tasks.first().expect("one managed task");
+        let full_task = full.tasks.first().expect("one managed task");
+
+        assert_eq!(
+            minimal_task.definition.settings,
+            full_task.definition.settings
+        );
+        assert_eq!(
+            minimal_task.definition.principal,
+            full_task.definition.principal
+        );
+        assert_eq!(
+            minimal_task.definition.triggers,
+            full_task.definition.triggers
+        );
+        assert_eq!(minimal_task.credentials, full_task.credentials);
+        let Some(Action::Exec(action)) = minimal_task.definition.actions.as_slice().first() else {
+            panic!("the minimal example declares one exec action");
+        };
+        assert!(!action.hide_window);
+        assert!(minimal.validate().is_valid());
+    }
+}

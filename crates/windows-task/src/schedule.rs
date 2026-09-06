@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{
     BootTrigger, DailyTrigger, EventTrigger, LogonTrigger, Repetition, TaskDateTime, TaskDuration,
-    TimeTrigger, Trigger, TriggerCommon, Weekday, WeeklyTrigger,
+    TimeTrigger, Trigger, Weekday, WeeklyTrigger,
 };
 
 #[cfg(feature = "cron")]
@@ -20,73 +20,41 @@ use crate::{
 /// Creates a one-time trigger.
 #[must_use]
 pub fn once(at: TaskDateTime) -> Trigger {
-    Trigger::Time(TimeTrigger {
-        common: TriggerCommon {
-            start_boundary: Some(at),
-            ..TriggerCommon::enabled()
-        },
-        random_delay: None,
-    })
+    TimeTrigger::new(at).into()
 }
 
 /// Creates a daily trigger at the supplied first boundary.
 #[must_use]
 pub fn daily(first: TaskDateTime) -> Trigger {
-    Trigger::Daily(DailyTrigger {
-        common: TriggerCommon {
-            start_boundary: Some(first),
-            ..TriggerCommon::enabled()
-        },
-        days_interval: 1,
-        random_delay: None,
-    })
+    DailyTrigger::new(first).into()
 }
 
 /// Creates a weekly trigger.
 #[must_use]
 pub fn weekly(first: TaskDateTime, days: impl IntoIterator<Item = Weekday>) -> Trigger {
-    Trigger::Weekly(WeeklyTrigger {
-        common: TriggerCommon {
-            start_boundary: Some(first),
-            ..TriggerCommon::enabled()
-        },
-        weeks_interval: 1,
-        days_of_week: days.into_iter().collect(),
-        random_delay: None,
-    })
+    WeeklyTrigger::new(first, days).into()
 }
 
 /// Creates a logon trigger for one user or for any user.
 #[must_use]
 pub fn at_logon(user_id: Option<String>) -> Trigger {
-    Trigger::Logon(LogonTrigger {
-        common: TriggerCommon::enabled(),
+    LogonTrigger {
         user_id,
-        delay: None,
-    })
+        ..LogonTrigger::new()
+    }
+    .into()
 }
 
 /// Creates a system boot trigger.
 #[must_use]
 pub fn at_startup() -> Trigger {
-    Trigger::Boot(BootTrigger {
-        common: TriggerCommon::enabled(),
-        delay: None,
-    })
+    BootTrigger::new().into()
 }
 
 /// Creates a Windows Event Log XPath trigger.
 #[must_use]
 pub fn on_event(subscription: impl Into<String>) -> Trigger {
-    Trigger::Event(EventTrigger {
-        common: TriggerCommon::enabled(),
-        subscription: subscription.into(),
-        value_queries: std::collections::BTreeMap::new(),
-        delay: None,
-        period_of_occurrence: None,
-        number_of_occurrences: None,
-        matching_element: None,
-    })
+    EventTrigger::new(subscription).into()
 }
 
 /// Creates a trigger that repeats forever from a boundary.
@@ -96,18 +64,13 @@ pub fn every(first: TaskDateTime, interval: TaskDuration) -> Result<Trigger, Sch
             "repeat interval must be greater than zero".into(),
         ));
     }
-    Ok(Trigger::Time(TimeTrigger {
-        common: TriggerCommon {
-            start_boundary: Some(first),
-            repetition: Some(Repetition {
-                interval,
-                duration: None,
-                stop_at_duration_end: false,
-            }),
-            ..TriggerCommon::enabled()
-        },
-        random_delay: None,
-    }))
+    let mut trigger = TimeTrigger::new(first);
+    trigger.common.repetition = Some(Repetition {
+        interval,
+        duration: None,
+        stop_at_duration_end: false,
+    });
+    Ok(trigger.into())
 }
 
 /// Parsed POSIX five-field cron expression.
@@ -188,69 +151,49 @@ impl CronSchedule {
     }
 
     fn calendar_trigger(&self, boundary: TaskDateTime) -> Trigger {
-        let common = TriggerCommon {
-            start_boundary: Some(boundary),
-            ..TriggerCommon::enabled()
+        let weekdays = || {
+            self.days_of_week
+                .values
+                .iter()
+                .map(|value| weekday(*value))
+                .collect::<Vec<_>>()
         };
-        if self.days_of_month.wildcard && self.days_of_week.wildcard && self.months.wildcard {
-            return Trigger::Daily(DailyTrigger {
-                common,
-                days_interval: 1,
-                random_delay: None,
-            });
-        }
-        if !self.days_of_week.wildcard && self.months.wildcard {
-            return Trigger::Weekly(WeeklyTrigger {
-                common,
-                weeks_interval: 1,
-                days_of_week: self
-                    .days_of_week
-                    .values
-                    .iter()
-                    .map(|value| weekday(*value))
-                    .collect(),
-                random_delay: None,
-            });
-        }
-        if !self.days_of_week.wildcard {
-            return Trigger::MonthlyDow(MonthlyDowTrigger {
-                common,
-                weeks_of_month: [
-                    WeekOfMonth::First,
-                    WeekOfMonth::Second,
-                    WeekOfMonth::Third,
-                    WeekOfMonth::Fourth,
-                ]
-                .into_iter()
-                .collect(),
-                days_of_week: self
-                    .days_of_week
-                    .values
-                    .iter()
-                    .map(|value| weekday(*value))
-                    .collect(),
-                months: self
-                    .months
-                    .values
-                    .iter()
-                    .map(|value| month(*value))
-                    .collect(),
-                run_on_last_week: true,
-                random_delay: None,
-            });
-        }
-        Trigger::Monthly(MonthlyTrigger {
-            common,
-            days_of_month: self.days_of_month.values.iter().copied().collect(),
-            months: self
-                .months
+        let months = || {
+            self.months
                 .values
                 .iter()
                 .map(|value| month(*value))
-                .collect(),
-            run_on_last_day: false,
-            random_delay: None,
-        })
+                .collect::<Vec<_>>()
+        };
+        if self.days_of_month.wildcard && self.days_of_week.wildcard && self.months.wildcard {
+            return DailyTrigger::new(boundary).into();
+        }
+        if !self.days_of_week.wildcard && self.months.wildcard {
+            return WeeklyTrigger::new(boundary, weekdays()).into();
+        }
+        if !self.days_of_week.wildcard {
+            return MonthlyDowTrigger {
+                run_on_last_week: true,
+                ..MonthlyDowTrigger::new(
+                    boundary,
+                    [
+                        WeekOfMonth::First,
+                        WeekOfMonth::Second,
+                        WeekOfMonth::Third,
+                        WeekOfMonth::Fourth,
+                    ],
+                    weekdays(),
+                    months(),
+                )
+            }
+            .into();
+        }
+        MonthlyTrigger::new(
+            boundary,
+            self.days_of_month.values.iter().copied(),
+            months(),
+        )
+        .into()
     }
 }
 

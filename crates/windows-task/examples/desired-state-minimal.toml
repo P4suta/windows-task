@@ -1,0 +1,28 @@
+# The shortest manifest that registers one working task.
+#
+# Every field omitted here takes the default documented on the corresponding
+# Rust type, and those defaults match Task Scheduler's own behaviour for an
+# absent Task XML element. In particular an omitted trigger `enabled` means the
+# trigger schedules, exactly as an absent `<Enabled>` element does in Task XML.
+#
+# `examples/desired-state.toml` shows the fully explicit form. Pin a value
+# there whenever a task must not follow a future change of default.
+
+format_version = 1
+owner = "550e8400-e29b-41d4-a716-446655440000"
+owner_name = "Acme Agent"
+namespace = '\Acme'
+
+[[tasks]]
+path = '\Acme\Heartbeat'
+
+[tasks.definition]
+
+[[tasks.definition.actions]]
+type = "exec"
+command = "acme-agent.exe"
+
+[[tasks.definition.triggers]]
+type = "daily"
+start_boundary = "2026-09-05T06:00:00"
+days_interval = 1
