@@ -211,26 +211,41 @@ mod tests {
 
     #[test]
     fn every_principal_constructor_agrees_with_its_logon_type() {
+        // Cases are named by constructor. A failure must not print the
+        // `Principal` itself: it carries an account identity, and this crate
+        // does not put identities into messages.
         let principals = [
-            Principal::service_account(ServiceAccount::LocalSystem),
-            Principal::service_account(ServiceAccount::LocalService),
-            Principal::service_account(ServiceAccount::NetworkService),
-            Principal::user("ACME\\operator"),
-            Principal::user_with_password("ACME\\operator"),
-            Principal::s4u("ACME\\operator"),
-            Principal::group("BUILTIN\\Administrators"),
-            Principal::default(),
+            (
+                "service_account/system",
+                Principal::service_account(ServiceAccount::LocalSystem),
+            ),
+            (
+                "service_account/local",
+                Principal::service_account(ServiceAccount::LocalService),
+            ),
+            (
+                "service_account/network",
+                Principal::service_account(ServiceAccount::NetworkService),
+            ),
+            ("user", Principal::user("ACME\\operator")),
+            (
+                "user_with_password",
+                Principal::user_with_password("ACME\\operator"),
+            ),
+            ("s4u", Principal::s4u("ACME\\operator")),
+            ("group", Principal::group("BUILTIN\\Administrators")),
+            ("default", Principal::default()),
         ];
-        for principal in principals {
+        for (case, principal) in principals {
             let definition = TaskDefinition::builder(ExecAction::new("agent.exe"))
-                .run_as(principal.clone())
+                .run_as(principal)
                 .build()
                 .expect("a constructed principal is internally consistent");
             assert!(
                 !definition.validate().diagnostics.iter().any(|diagnostic| {
                     diagnostic.code == DiagnosticCode::PrincipalLogonMismatch
                 }),
-                "{principal:?}"
+                "{case}"
             );
         }
     }

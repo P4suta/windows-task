@@ -444,7 +444,7 @@ mod tests {
 
 #[cfg(test)]
 mod example_documents {
-    use super::{DocumentFormat, TaskManifest};
+    use super::{DocumentFormat, ManagedTask, TaskManifest};
     use crate::model::{Action, Principal, TaskSettings};
 
     const FULL: &str = include_str!("../examples/desired-state.toml");
@@ -497,10 +497,17 @@ mod example_documents {
             full_task.definition.triggers
         );
         assert_eq!(minimal_task.credentials, full_task.credentials);
-        let Some(Action::Exec(action)) = minimal_task.definition.actions.as_slice().first() else {
-            panic!("the minimal example declares one exec action");
+
+        // The minimal document omits `hide_window`; the explicit one writes it.
+        // Compare the two rather than asserting a literal, so this keeps
+        // checking the contract if the explicit document ever pins a different
+        // value.
+        let exec = |task: &ManagedTask| match task.definition.actions.as_slice().first() {
+            Some(Action::Exec(action)) => action.clone(),
+            other => panic!("both examples declare one exec action, found {other:?}"),
         };
-        assert!(!action.hide_window);
+        let (minimal_action, full_action) = (exec(minimal_task), exec(full_task));
+        assert_eq!(minimal_action.hide_window, full_action.hide_window);
         assert!(minimal.validate().is_valid());
     }
 }

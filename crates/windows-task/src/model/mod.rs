@@ -587,8 +587,15 @@ mod default_parity_tests {
         });
         // `HideAppWindow` is the one the writer already omits when false; the
         // other four are written explicitly and are stripped here.
-        assert_eq!(written.len(), OPTIONAL.len() - 1, "{xml}");
-        assert!(!xml.contains("HideAppWindow"), "{xml}");
+        assert_eq!(
+            written.len(),
+            OPTIONAL.len() - 1,
+            "the writer emits every optional element except HideAppWindow"
+        );
+        assert!(
+            !xml.contains("HideAppWindow"),
+            "the writer omits HideAppWindow when it is false"
+        );
         assert_eq!(
             crate::xml::from_bytes(without_elements.as_bytes()).expect("XML without the elements"),
             definition,
@@ -611,7 +618,11 @@ mod default_parity_tests {
             without_keys.push_str(line);
             without_keys.push('\n');
         }
-        assert_eq!(omitted, OPTIONAL.len(), "{document}");
+        assert_eq!(
+            omitted,
+            OPTIONAL.len(),
+            "a manifest writes every optional key"
+        );
         assert_eq!(
             toml::from_str::<TaskDefinition>(&without_keys).expect("manifest without the keys"),
             definition,
@@ -620,7 +631,10 @@ mod default_parity_tests {
 
         // Collections the XML writer omits when empty stay empty on both paths.
         for absent in ["ValueQueries", "Attachments", "HeaderFields"] {
-            assert!(!xml.contains(absent), "{xml}");
+            assert!(
+                !xml.contains(absent),
+                "the writer omits an empty collection entirely"
+            );
         }
         assert_eq!(
             crate::xml::from_bytes(xml.as_bytes()).expect("round trip"),
