@@ -11,12 +11,14 @@ permissions:
 jobs:
   commitlint:
     runs-on: ubuntu-latest
-    # Skip for dependabot: its auto-generated subjects/bodies exceed the
-    # 50/72 limits, and its PRs squash-merge with a maintainer subject.
-    # Guard on the PR *author*, not `github.actor`, so a maintainer
-    # `gh pr update-branch` on a bot PR doesn't flip the guard and let
-    # the bot's long subjects through `committed`.
-    if: github.event.pull_request.user.login != 'dependabot[bot]'
+    # Skip PRs opened by any bot account (a login ending in `[bot]`, such as `renovate[bot]`).
+    # Renovate writes lowercase Conventional subjects (`build(deps): update … to v2`),
+    # which this repository's capitalized-subject rule and 50/72 limits reject,
+    # and a bot cannot be asked to reword its commits.
+    # A skipped job reports success, so the skip never blocks a required check or an automerge.
+    # Guard on the PR *author*, not `github.actor`,
+    # so a maintainer's `gh pr update-branch` on a bot PR cannot flip the guard.
+    if: ${{ !endsWith(github.event.pull_request.user.login, '[bot]') }}
     steps:
       - uses: actions/checkout@v7
         with:
