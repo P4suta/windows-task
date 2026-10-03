@@ -872,7 +872,8 @@ fn apply_backend(
                     None,
                 );
                 report.applied.push(change.clone());
-                for (later, expected) in plan.changes.iter().zip(&mut expected).skip(index + 1) {
+                for (later, expected) in plan.changes.iter().zip(&mut expected).skip(index).skip(1)
+                {
                     if recovery::same_target(change, &later.change) {
                         *expected = after.clone();
                     }
@@ -1232,7 +1233,6 @@ fn compensate_change(
                 backup.raw,
                 backup.logon_type,
                 RegistrationOptions {
-                    mode: RegistrationMode::CreateOrUpdate,
                     ignore_registration_triggers: options.ignore_registration_triggers,
                     password: backup.password,
                     ..RegistrationOptions::default()

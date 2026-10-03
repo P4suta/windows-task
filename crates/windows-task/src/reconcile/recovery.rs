@@ -348,7 +348,9 @@ pub(super) fn information(manifest: &TaskManifest, change: &Change) -> SecurityI
             .find(|folder| folder.path == *path)
             .and_then(|folder| folder.security_descriptor.as_ref())
     };
-    let base = SecurityInformation::OWNER | SecurityInformation::GROUP | SecurityInformation::DACL;
+    let base = SecurityInformation::OWNER
+        .union(SecurityInformation::GROUP)
+        .union(SecurityInformation::DACL);
     descriptor.map_or(base, |descriptor| {
         base | super::security_information_for_sddl(descriptor)
     })
