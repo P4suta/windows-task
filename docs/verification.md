@@ -98,6 +98,17 @@ The example shares the fuzz oracle but is not a libFuzzer target. Native resourc
 checks accept `-TimeoutSeconds` and preserve a failure report when their disposable
 test process exceeds the deadline. This does not change production COM shutdown.
 
+`cargo xtask prove-xml` runs Kani 0.68.0 against the production XML extension merger.
+Install it with `cargo +stable install --locked kani-verifier --version 0.68.0` and `cargo kani setup` on a supported host.
+Linux `cargo xtask ci` and the required portable CI job include all seven named proofs and reject a missing harness or a different verifier version.
+The position proof covers every `usize` ordinal and child count without a loop bound.
+The ordering proofs call the production generic merger with all four presence combinations of two optional known children, two extensions, and arbitrary `usize` ordinals, with unwinding and reachability checks enabled.
+They establish length, known-child order, valid distinct absolute positions, and the original concrete regression within that bound.
+The generic core only moves opaque child values; the XML adapter filters parent identities and maps absent strings to `None` before merging.
+Public round-trip tests and coverage-guided fuzzing verify the parser/writer boundary beyond the proof harness.
+The verification batch is also proved to execute all six XML checks on success and stop at the first failure for every combination of command outcomes.
+This proof trusts the pinned verifier's exit status and the operating system's process reporting; it does not prove those external tools.
+
 The initial local baseline is recorded in
 `target/verification/baseline/test.log`: 28 library tests passed, but the native
 read-only smoke failed because standard XML references were rejected. The old

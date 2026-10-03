@@ -19,6 +19,8 @@ use crate::{
     },
 };
 
+mod ordering;
+
 /// Default maximum decoded XML size.
 pub const DEFAULT_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// Default maximum XML nesting depth.
@@ -1657,19 +1659,16 @@ fn has_extensions(definition: &TaskDefinition, parent: &str) -> bool {
 }
 
 fn merge_extensions(parent: &str, known: Vec<String>, extensions: &[XmlExtension]) -> Vec<String> {
-    let mut output: Vec<_> = known
+    let known = known
         .into_iter()
-        .filter(|child| !child.is_empty())
+        .map(|child| (!child.is_empty()).then_some(child))
         .collect();
-    let mut matching: Vec<_> = extensions
+    let matching = extensions
         .iter()
         .filter(|extension| extension.parent == parent)
+        .map(|extension| ordering::Positioned::new(extension.ordinal, extension.xml.clone()))
         .collect();
-    matching.sort_by_key(|extension| extension.ordinal);
-    for extension in matching {
-        output.insert(extension.ordinal.min(output.len()), extension.xml.clone());
-    }
-    output
+    ordering::merge(known, matching)
 }
 
 fn container(name: &str, children: Vec<String>, attributes: &[(&str, &str)], text: &str) -> String {
@@ -1891,10 +1890,17 @@ mod tests {
     #[test]
     fn multiple_extensions_keep_absolute_sibling_positions() {
         for parent in ["Task", "Task/Settings", "Task/RegistrationInfo"] {
-            let extensions = [0, 1].map(|ordinal| XmlExtension {
-                parent: parent.into(),
-                ordinal,
-                xml: format!("<Future{ordinal} />"),
+            let mut extensions = [0, 1]
+                .map(|ordinal| XmlExtension {
+                    parent: parent.into(),
+                    ordinal,
+                    xml: format!("<Future{ordinal} />"),
+                })
+                .to_vec();
+            extensions.push(XmlExtension {
+                parent: format!("{parent}/Else"),
+                ordinal: 0,
+                xml: "<Foreign />".into(),
             });
             assert_eq!(
                 merge_extensions(

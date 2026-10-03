@@ -43,6 +43,8 @@ enum Command {
     },
     /// Audit against a freshly cloned advisory database without replacing shared caches.
     Audit,
+    /// Prove bounded XML extension ordering with the pinned Kani verifier.
+    ProveXml,
     /// Scan source safety rules without requiring a Unix shell.
     StrictCode,
     /// Save platform-specific coverage without conflating compile-only targets.
@@ -159,6 +161,7 @@ fn run(cli: Cli) -> Result<()> {
             artifacts,
         } => release::upload_draft(&repo, &tag, Some(&artifacts), &[], false),
         Command::Audit => verification::audit(),
+        Command::ProveXml => verification::prove_xml(),
         Command::StrictCode => verification::strict_code(),
         Command::Coverage => verification::coverage(),
         Command::Ci { suite } => verification::ci(suite),

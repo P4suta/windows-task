@@ -13,6 +13,7 @@ that links back.
 | [0004](./adr/0004-make-reconciliation-owned-and-compensating.md) | Make reconciliation owned and compensating | accepted |
 | [0005](./adr/0005-generate-a-contained-com-handler-server.md) | Generate a contained COM handler server | accepted |
 | [0006](./adr/0006-make-failures-observable-and-reproducible.md) | Make failures observable and reproducible | accepted |
+| [0007](./adr/0007-verify-absolute-xml-extension-ordering.md) | Verify absolute XML extension ordering | accepted |
 
 ## Authoring a new ADR
 

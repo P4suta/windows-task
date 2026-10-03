@@ -12,6 +12,25 @@ use clap::ValueEnum;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+#[cfg(kani)]
+mod proofs;
+
+const XML_HARNESSES: [&str; 6] = [
+    "xml::ordering::proofs::absolute_ordinal_is_bounded_without_arithmetic",
+    "xml::ordering::proofs::extension_merge_without_known_children",
+    "xml::ordering::proofs::extension_merge_with_first_known_child",
+    "xml::ordering::proofs::extension_merge_with_second_known_child",
+    "xml::ordering::proofs::extension_merge_with_both_known_children",
+    "xml::ordering::proofs::extension_merge_regression_is_reachable",
+];
+
+fn verify_xml_batch<E>(mut verify: impl FnMut(&str) -> Result<(), E>) -> Result<(), E> {
+    for harness in XML_HARNESSES {
+        verify(harness)?;
+    }
+    Ok(())
+}
+
 fn verification_command(program: &str) -> Command {
     let mut command = Command::new(program);
     for variable in [
@@ -392,6 +411,66 @@ impl Run {
         }
         Ok(())
     }
+
+    fn prove_xml(&mut self) -> Result<()> {
+        self.finish()?;
+        let version_log = self
+            .directory
+            .join(format!("{:02}.stdout.log", self.results.len()));
+        self.step("cargo", &["kani", "--version"], &[])?;
+        self.finish()?;
+        ensure!(
+            fs::read_to_string(version_log)?.lines().next()
+                == Some("Kani Rust Verifier 0.68.0 (cargo plugin)"),
+            "XML proofs require Kani 0.68.0"
+        );
+        let target = self.cargo_target.join("kani");
+        let target = target.to_str().context("proof output path must be UTF-8")?;
+        verify_xml_batch(|harness| {
+            self.step(
+                "cargo",
+                &[
+                    "kani",
+                    "-p",
+                    "windows-task",
+                    "--lib",
+                    "--no-default-features",
+                    "--exact",
+                    "--harness",
+                    harness,
+                    "--jobs",
+                    "1",
+                    "--target-dir",
+                    target,
+                    "--output-format",
+                    "terse",
+                ],
+                &[],
+            )?;
+            self.finish()
+        })?;
+        self.step(
+            "cargo",
+            &[
+                "kani",
+                "-p",
+                "xtask",
+                "--bin",
+                "xtask",
+                "--exact",
+                "--harness",
+                "verification::proofs::proof_batch_stops_on_first_failure",
+                "--jobs",
+                "1",
+                "--target-dir",
+                target,
+                "--output-format",
+                "terse",
+            ],
+            &[],
+        )?;
+        self.finish()
+    }
 }
 
 pub(super) fn test(suite: Suite) -> Result<()> {
@@ -404,6 +483,11 @@ pub(super) fn audit() -> Result<()> {
     let mut run = Run::new()?;
     run.audit()?;
     run.finish()
+}
+
+pub(super) fn prove_xml() -> Result<()> {
+    let mut run = Run::new()?;
+    run.prove_xml()
 }
 
 pub(super) fn ci(suite: Suite) -> Result<()> {
@@ -474,6 +558,9 @@ pub(super) fn ci(suite: Suite) -> Result<()> {
     }
     run.actionlint()?;
     run.audit()?;
+    if cfg!(target_os = "linux") {
+        run.prove_xml()?;
+    }
     if cfg!(windows) {
         run.step(
             "cmd",
