@@ -64,12 +64,14 @@ fn audit_configuration(source: &str, cache: &std::path::Path) -> Result<String> 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub(super) enum Suite {
     Portable,
+    NativeFixture,
     Windows,
     All,
 }
 
 struct Run {
     directory: PathBuf,
+    cargo_target: PathBuf,
     results: Vec<Value>,
 }
 
@@ -99,10 +101,36 @@ impl Run {
             serde_json::to_vec_pretty(&environment)?,
         )?;
         eprintln!("Verification artifacts: {}", directory.display());
+        let cargo_target = std::path::absolute(
+            std::env::var_os("CARGO_TARGET_DIR")
+                .map_or_else(
+                    || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+                    PathBuf::from,
+                )
+                .join("verification-checks"),
+        )?;
         Ok(Self {
             directory,
+            cargo_target,
             results: Vec::new(),
         })
+    }
+
+    fn for_package() -> Result<Self> {
+        let mut run = Self::new()?;
+        let parent = run
+            .cargo_target
+            .parent()
+            .context("verification target requires a parent")?
+            .join("verification-packages");
+        fs::create_dir_all(&parent)?;
+        run.cargo_target = parent.join(
+            run.directory
+                .file_name()
+                .context("verification identity is required")?,
+        );
+        fs::create_dir(&run.cargo_target).context("create fresh private package outputs")?;
+        Ok(run)
     }
 
     fn step(
@@ -154,24 +182,24 @@ impl Run {
     }
 
     fn cargo(&mut self, arguments: &[&str]) -> Result<()> {
+        self.cargo_with_environment(arguments, &[])
+    }
+
+    fn cargo_with_environment(
+        &mut self,
+        arguments: &[&str],
+        environment: &[(&str, &str)],
+    ) -> Result<()> {
         let mut args = vec!["+1.85.0"];
         args.extend_from_slice(arguments);
-        let target = std::env::var_os("CARGO_TARGET_DIR")
-            .map_or_else(
-                || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"),
-                PathBuf::from,
-            )
-            .join("verification-checks");
-        self.step(
-            "cargo",
-            &args,
-            &[(
-                "CARGO_TARGET_DIR",
-                target
-                    .to_str()
-                    .context("verification target must be UTF-8")?,
-            )],
-        )
+        let target = self
+            .cargo_target
+            .to_str()
+            .context("verification target must be UTF-8")?
+            .to_owned();
+        let mut environment = environment.to_vec();
+        environment.push(("CARGO_TARGET_DIR", &target));
+        self.step("cargo", &args, &environment)
     }
 
     fn prepare_audit(&self) -> Result<PathBuf> {
@@ -272,11 +300,11 @@ impl Run {
                 "macro_contracts",
             ])?;
         }
-        if matches!(suite, Suite::Windows | Suite::All) {
+        if matches!(suite, Suite::NativeFixture | Suite::Windows | Suite::All) {
             if !cfg!(windows) {
                 self.results
                     .push(json!({"suite": "windows", "outcome": "not_run",
-                    "error": "requires a disposable Windows host"}));
+                    "error": "requires a Windows host; scheduler suites require a disposable host"}));
                 fs::write(
                     self.directory.join("results.json"),
                     serde_json::to_vec_pretty(&self.results)?,
@@ -289,12 +317,11 @@ impl Run {
                 "--manifest-path",
                 "fixtures/native/Cargo.toml",
             ])?;
-            let dll = std::env::current_dir()?
-                .join("fixtures/native/target/release/windows_task_native_fixture.dll");
-            self.step(
-                "cargo",
+            let dll = self
+                .cargo_target
+                .join("release/windows_task_native_fixture.dll");
+            self.cargo_with_environment(
                 &[
-                    "+1.85.0",
                     "test",
                     "--locked",
                     "-p",
@@ -308,24 +335,22 @@ impl Run {
                 ],
                 &[("WINDOWS_TASK_HANDLER_DLL", &dll.to_string_lossy())],
             )?;
-            self.step(
-                "cargo",
+        }
+        if matches!(suite, Suite::Windows | Suite::All) && cfg!(windows) {
+            self.cargo(&[
+                "test",
+                "--locked",
+                "-p",
+                "windows-task",
+                "--all-features",
+                "--test",
+                "windows_smoke",
+            ])?;
+            let execution_fixture = self
+                .cargo_target
+                .join("release/windows-task-execution-fixture.exe");
+            self.cargo_with_environment(
                 &[
-                    "+1.85.0",
-                    "test",
-                    "--locked",
-                    "-p",
-                    "windows-task",
-                    "--all-features",
-                    "--test",
-                    "windows_smoke",
-                ],
-                &[],
-            )?;
-            self.step(
-                "cargo",
-                &[
-                    "+1.85.0",
                     "test",
                     "--locked",
                     "-p",
@@ -350,11 +375,7 @@ impl Run {
                     ),
                     (
                         "WINDOWS_TASK_EXECUTION_FIXTURE",
-                        &std::env::current_dir()?
-                            .join(
-                                "fixtures/native/target/release/windows-task-execution-fixture.exe",
-                            )
-                            .to_string_lossy(),
+                        &execution_fixture.to_string_lossy(),
                     ),
                 ],
             )?;
@@ -485,7 +506,7 @@ pub(super) fn ci(suite: Suite) -> Result<()> {
 }
 
 pub(super) fn package() -> Result<()> {
-    let mut run = Run::new()?;
+    let mut run = Run::for_package()?;
     let version = env!("CARGO_PKG_VERSION");
     let staging = run.directory.join("source");
     fs::create_dir(&staging)?;
@@ -524,7 +545,9 @@ pub(super) fn package() -> Result<()> {
         }
         run.cargo(&arguments)?;
         run.finish()?;
-        let archive = staging.join(format!("target/package/{name}-{version}.crate"));
+        let archive = run
+            .cargo_target
+            .join(format!("package/{name}-{version}.crate"));
         // Preserve the actual package outside compiler caches for CI artifacts.
         fs::copy(&archive, unpack.join(format!("{name}-{version}.crate")))?;
         run.step(
@@ -584,13 +607,9 @@ fn main() -> windows_task::Result<()> {
         &consumer.join("Cargo.toml").to_string_lossy(),
     ])?;
     if cfg!(windows) {
-        let dll = std::env::current_dir()?
-            .join(&consumer)
-            .join("target/release/verification_handler.dll");
-        run.step(
-            "cargo",
+        let dll = run.cargo_target.join("release/verification_handler.dll");
+        run.cargo_with_environment(
             &[
-                "+1.85.0",
                 "test",
                 "--locked",
                 "-p",

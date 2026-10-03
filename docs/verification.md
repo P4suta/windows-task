@@ -30,11 +30,14 @@ Run coverage after CI has finished. The coverage tool cleans some shared test
 artifacts, so running it concurrently with trybuild can collide with loaded DLLs
 on Windows. Retain that first failure if it occurs and rerun sequentially.
 
-`cargo xtask test --suite portable` runs deterministic library/CLI tests and
-documentation. `--suite windows` selects native integration tests, including
-explicitly ignored mutation tests, on an isolated disposable Windows host.
-`--suite all` runs both. Mutation tests have unique names and must report cleanup
-errors; running ordinary `cargo test` leaves them visibly ignored.
+`cargo xtask test --suite portable` runs deterministic library/CLI tests and documentation.
+`--suite native-fixture` builds the native fixture and verifies its isolated COM lifecycle on a development Windows host.
+`--suite windows` selects native integration tests, including explicitly ignored mutation tests, on an isolated disposable Windows host.
+`--suite all` runs both portable and Windows suites.
+Mutation tests have unique names and must report cleanup errors; running ordinary `cargo test` leaves them visibly ignored.
+
+Cargo commands and artifact consumers share one explicit output directory per verification run.
+Package runs use a fresh output directory under the configured Cargo target root, and retain their actual archives and consumer inputs with the verification evidence.
 
 The native suite now also verifies a real Operational log clear. This requires
 `GITHUB_ACTIONS=true`, `RUNNER_ENVIRONMENT=github-hosted` and the explicit
