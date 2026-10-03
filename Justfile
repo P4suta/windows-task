@@ -77,8 +77,8 @@ markdownlint:
 strict-code:
     cargo xtask strict-code
 
-prove-xml:
-    cargo xtask prove-xml
+prove:
+    cargo xtask prove
 
 lint: fmt-check clippy typos actionlint yamllint markdownlint strict-code
 

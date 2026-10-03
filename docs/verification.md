@@ -98,16 +98,20 @@ The example shares the fuzz oracle but is not a libFuzzer target. Native resourc
 checks accept `-TimeoutSeconds` and preserve a failure report when their disposable
 test process exceeds the deadline. This does not change production COM shutdown.
 
-`cargo xtask prove-xml` runs Kani 0.68.0 against the production XML extension merger.
+`cargo xtask prove` runs Kani 0.68.0 against production XML ordering, release fingerprints, and the verification batch.
 Install it with `cargo +stable install --locked kani-verifier --version 0.68.0` and `cargo kani setup` on a supported host.
-Linux `cargo xtask ci` and the required portable CI job include all seven named proofs and reject a missing harness or a different verifier version.
+Linux `cargo xtask test`, its normal pre-push hook, `cargo xtask ci`, and the required portable CI job include all eight named proofs and reject a missing harness or a different verifier version.
+Each batch creates a fresh private proof output directory so compiled models from another checkout cannot satisfy the current proof.
 The position proof covers every `usize` ordinal and child count without a loop bound.
 The ordering proofs call the production generic merger with all four presence combinations of two optional known children, two extensions, and arbitrary `usize` ordinals, with unwinding and reachability checks enabled.
 They establish length, known-child order, valid distinct absolute positions, and the original concrete regression within that bound.
 The generic core only moves opaque child values; the XML adapter filters parent identities and maps absent strings to `None` before merging.
 Public round-trip tests and coverage-guided fuzzing verify the parser/writer boundary beyond the proof harness.
-The verification batch is also proved to execute all six XML checks on success and stop at the first failure for every combination of command outcomes.
-This proof trusts the pinned verifier's exit status and the operating system's process reporting; it does not prove those external tools.
+The verification batch is proved to execute all eight required checks on success and stop at the first failure for every combination of command outcomes.
+Failed output preparation is proved to stop before any verifier call.
+This proof trusts exclusive directory creation, the pinned verifier's exit status, and the operating system's process reporting; it does not prove those external boundaries.
+The release identity proof checks the production fingerprint comparison for every `u64` size and 32-byte digest pair.
+Hashing, GitHub metadata, and artifact transport retain their integration checks and external trust assumptions.
 
 The initial local baseline is recorded in
 `target/verification/baseline/test.log`: 28 library tests passed, but the native

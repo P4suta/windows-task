@@ -15,20 +15,71 @@ use uuid::Uuid;
 #[cfg(kani)]
 mod proofs;
 
-const XML_HARNESSES: [&str; 6] = [
-    "xml::ordering::proofs::absolute_ordinal_is_bounded_without_arithmetic",
-    "xml::ordering::proofs::extension_merge_without_known_children",
-    "xml::ordering::proofs::extension_merge_with_first_known_child",
-    "xml::ordering::proofs::extension_merge_with_second_known_child",
-    "xml::ordering::proofs::extension_merge_with_both_known_children",
-    "xml::ordering::proofs::extension_merge_regression_is_reachable",
+#[derive(Clone, Copy)]
+enum ProofTarget {
+    XmlLibrary,
+    Automation,
+}
+
+impl ProofTarget {
+    fn arguments(self) -> &'static [&'static str] {
+        match self {
+            Self::XmlLibrary => &[
+                "kani",
+                "-p",
+                "windows-task",
+                "--lib",
+                "--no-default-features",
+            ],
+            Self::Automation => &["kani", "-p", "xtask", "--bin", "xtask"],
+        }
+    }
+}
+
+const REQUIRED_PROOFS: [(ProofTarget, &str); 8] = [
+    (
+        ProofTarget::XmlLibrary,
+        "xml::ordering::proofs::absolute_ordinal_is_bounded_without_arithmetic",
+    ),
+    (
+        ProofTarget::XmlLibrary,
+        "xml::ordering::proofs::extension_merge_without_known_children",
+    ),
+    (
+        ProofTarget::XmlLibrary,
+        "xml::ordering::proofs::extension_merge_with_first_known_child",
+    ),
+    (
+        ProofTarget::XmlLibrary,
+        "xml::ordering::proofs::extension_merge_with_second_known_child",
+    ),
+    (
+        ProofTarget::XmlLibrary,
+        "xml::ordering::proofs::extension_merge_with_both_known_children",
+    ),
+    (
+        ProofTarget::XmlLibrary,
+        "xml::ordering::proofs::extension_merge_regression_is_reachable",
+    ),
+    (
+        ProofTarget::Automation,
+        "verification::proofs::proof_batch_stops_on_first_failure",
+    ),
+    (
+        ProofTarget::Automation,
+        "release::proofs::fingerprint_identity_includes_size_and_digest",
+    ),
 ];
 
-fn verify_xml_batch<E>(mut verify: impl FnMut(&str) -> Result<(), E>) -> Result<(), E> {
-    for harness in XML_HARNESSES {
-        verify(harness)?;
+fn verify_proof_batch<P, E>(
+    preparation: Result<P, E>,
+    mut verify: impl FnMut(&P, ProofTarget, &str) -> Result<(), E>,
+) -> Result<P, E> {
+    let prepared = preparation?;
+    for (target, harness) in REQUIRED_PROOFS {
+        verify(&prepared, target, harness)?;
     }
-    Ok(())
+    Ok(prepared)
 }
 
 fn verification_command(program: &str) -> Command {
@@ -412,7 +463,13 @@ impl Run {
         Ok(())
     }
 
-    fn prove_xml(&mut self) -> Result<()> {
+    fn proof_target(&self) -> Result<PathBuf> {
+        let target = self.directory.join("proofs");
+        fs::create_dir(&target).context("create fresh private proof outputs")?;
+        Ok(target.join("target"))
+    }
+
+    fn prove(&mut self) -> Result<()> {
         self.finish()?;
         let version_log = self
             .directory
@@ -422,53 +479,25 @@ impl Run {
         ensure!(
             fs::read_to_string(version_log)?.lines().next()
                 == Some("Kani Rust Verifier 0.68.0 (cargo plugin)"),
-            "XML proofs require Kani 0.68.0"
+            "implementation proofs require Kani 0.68.0"
         );
-        let target = self.cargo_target.join("kani");
-        let target = target.to_str().context("proof output path must be UTF-8")?;
-        verify_xml_batch(|harness| {
-            self.step(
-                "cargo",
-                &[
-                    "kani",
-                    "-p",
-                    "windows-task",
-                    "--lib",
-                    "--no-default-features",
-                    "--exact",
-                    "--harness",
-                    harness,
-                    "--jobs",
-                    "1",
-                    "--target-dir",
-                    target,
-                    "--output-format",
-                    "terse",
-                ],
-                &[],
-            )?;
-            self.finish()
-        })?;
-        self.step(
-            "cargo",
-            &[
-                "kani",
-                "-p",
-                "xtask",
-                "--bin",
-                "xtask",
+        verify_proof_batch(self.proof_target(), |target, kind, harness| {
+            let target = target.to_str().context("proof output path must be UTF-8")?;
+            let mut arguments = kind.arguments().to_vec();
+            arguments.extend_from_slice(&[
                 "--exact",
                 "--harness",
-                "verification::proofs::proof_batch_stops_on_first_failure",
+                harness,
                 "--jobs",
                 "1",
                 "--target-dir",
                 target,
                 "--output-format",
                 "terse",
-            ],
-            &[],
-        )?;
+            ]);
+            self.step("cargo", &arguments, &[])?;
+            self.finish()
+        })?;
         self.finish()
     }
 }
@@ -476,6 +505,9 @@ impl Run {
 pub(super) fn test(suite: Suite) -> Result<()> {
     let mut run = Run::new()?;
     run.suite(suite)?;
+    if cfg!(target_os = "linux") {
+        run.prove()?;
+    }
     run.finish()
 }
 
@@ -485,9 +517,9 @@ pub(super) fn audit() -> Result<()> {
     run.finish()
 }
 
-pub(super) fn prove_xml() -> Result<()> {
+pub(super) fn prove() -> Result<()> {
     let mut run = Run::new()?;
-    run.prove_xml()
+    run.prove()
 }
 
 pub(super) fn ci(suite: Suite) -> Result<()> {
@@ -559,7 +591,7 @@ pub(super) fn ci(suite: Suite) -> Result<()> {
     run.actionlint()?;
     run.audit()?;
     if cfg!(target_os = "linux") {
-        run.prove_xml()?;
+        run.prove()?;
     }
     if cfg!(windows) {
         run.step(
@@ -905,6 +937,20 @@ mod tests {
                 "unhandled repository variable: {variable}"
             );
         }
+    }
+
+    #[test]
+    fn existing_proof_outputs_cannot_be_reused_or_overwritten() {
+        let run = Run::new().expect("verification directory");
+        let target = run.proof_target().expect("fresh private proof outputs");
+        fs::create_dir(&target).expect("simulated compiled proof models");
+        let model = target.join("previous-model");
+        fs::write(&model, b"previous checkout").expect("retained negative evidence");
+        run.proof_target().expect_err("existing outputs must fail");
+        assert_eq!(
+            fs::read(model).expect("preserved model"),
+            b"previous checkout"
+        );
     }
 
     #[test]

@@ -11,6 +11,9 @@ use anyhow::{Context as _, Result, ensure};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
+#[cfg(kani)]
+mod proofs;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Fingerprint {
     size: u64,

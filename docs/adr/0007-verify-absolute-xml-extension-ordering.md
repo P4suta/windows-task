@@ -18,6 +18,7 @@ Represent absent children with `Option` and absolute positions with a type whose
 Move opaque child values through this core and retain parent filtering in the XML adapter.
 
 Run pinned Kani proofs against the production core in the required Linux verification gate.
+Create fresh private proof outputs for each batch; shared compiled models produced a passing result for a broken checkout during the negative check.
 Check every expected harness individually with exact matching, retaining memory, overflow, unwinding, and assertion reachability checks.
 Prove the index contract for every `usize` ordinal and child count, and the merger contract for two optional known children and two extensions with arbitrary `usize` ordinals.
 Include the original reachable counterexample and verify that a representative broken implementation fails the gate.
