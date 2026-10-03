@@ -29,5 +29,7 @@ include the shared README, Apache-2.0 and MIT texts, and NOTICE.
 Finally, create and push `v<workspace-version>`.
 The release workflow verifies the tag, builds x64 and ARM64 CLI archives on Windows, and adds SHA-256 checksum files.
 It attaches the complete artifact set to an unpublished draft before final publication.
-A retry may add missing draft assets, and conflicting names abort without replacement.
+A retry reuses draft assets only when their size and SHA-256 match, uploads missing assets, and rejects conflicting or unexpected assets before publication.
+Legacy assets without a recorded digest are verified from downloaded bytes.
+Final publication verifies that the version tag exists remotely.
 Published releases and their assets cannot be updated; corrections require a new version.

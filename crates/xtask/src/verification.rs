@@ -446,10 +446,8 @@ pub(super) fn ci(suite: Suite) -> Result<()> {
         }
         run.cargo(&args)?;
     }
-    run.step(
-        "cargo",
+    run.cargo_with_environment(
         &[
-            "+1.85.0",
             "doc",
             "--locked",
             "--workspace",
