@@ -19,6 +19,8 @@ use crate::{
     },
 };
 
+mod ordering;
+
 /// Default maximum decoded XML size.
 pub const DEFAULT_MAX_BYTES: usize = 8 * 1024 * 1024;
 /// Default maximum XML nesting depth.
@@ -1657,19 +1659,16 @@ fn has_extensions(definition: &TaskDefinition, parent: &str) -> bool {
 }
 
 fn merge_extensions(parent: &str, known: Vec<String>, extensions: &[XmlExtension]) -> Vec<String> {
-    let mut output = known;
-    let mut matching: Vec<_> = extensions
+    let known = known
+        .into_iter()
+        .map(|child| (!child.is_empty()).then_some(child))
+        .collect();
+    let matching = extensions
         .iter()
         .filter(|extension| extension.parent == parent)
+        .map(|extension| ordering::Positioned::new(extension.ordinal, extension.xml.clone()))
         .collect();
-    matching.sort_by_key(|extension| extension.ordinal);
-    for (offset, extension) in matching.into_iter().enumerate() {
-        output.insert(
-            (extension.ordinal + offset).min(output.len()),
-            extension.xml.clone(),
-        );
-    }
-    output
+    ordering::merge(known, matching)
 }
 
 fn container(name: &str, children: Vec<String>, attributes: &[(&str, &str)], text: &str) -> String {
@@ -1809,7 +1808,10 @@ mod tests {
         XmlExtension,
     };
 
-    use super::{ParseLimits, RawTaskXml, from_bytes, to_string, to_utf16le, without_declaration};
+    use super::{
+        ParseLimits, RawTaskXml, from_bytes, merge_extensions, to_string, to_utf16le,
+        without_declaration,
+    };
 
     #[test]
     fn minimal_definition_round_trips() {
@@ -1883,6 +1885,73 @@ mod tests {
         };
         RawTaskXml::with_limits(b"<Task><Child /></Task>".to_vec(), limits)
             .expect_err("depth limit is enforced");
+    }
+
+    #[test]
+    fn multiple_extensions_keep_absolute_sibling_positions() {
+        for parent in ["Task", "Task/Settings", "Task/RegistrationInfo"] {
+            let mut extensions = [0, 1]
+                .map(|ordinal| XmlExtension {
+                    parent: parent.into(),
+                    ordinal,
+                    xml: format!("<Future{ordinal} />"),
+                })
+                .to_vec();
+            extensions.push(XmlExtension {
+                parent: format!("{parent}/Else"),
+                ordinal: 0,
+                xml: "<Foreign />".into(),
+            });
+            assert_eq!(
+                merge_extensions(
+                    parent,
+                    vec!["<Known0 />".into(), String::new(), "<Known1 />".into()],
+                    &extensions,
+                ),
+                ["<Future0 />", "<Future1 />", "<Known0 />", "<Known1 />"],
+                "absolute child positions for {parent}"
+            );
+        }
+    }
+
+    #[test]
+    fn multiple_extensions_preserve_canonical_round_trip() {
+        for unknown in [
+            "<Future0 /><Future1 />",
+            "<Settings><Future0 /><Future1 /></Settings>",
+            "<Settings><AllowStartOnDemand>true</AllowStartOnDemand><DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>true</StopIfGoingOnBatteries><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><Future0 /><Future1 /></Settings>",
+            "<RegistrationInfo><Future0 /><Future1 /><Author>a</Author><Description>d</Description><URI>u</URI></RegistrationInfo>",
+            "<RegistrationInfo><Author>a</Author><Description>d</Description><Documentation>doc</Documentation><Source>src</Source><Future0 /><Future1 /><URI>u</URI></RegistrationInfo>",
+        ] {
+            let input = format!(
+                "<Task>{unknown}<Actions><Exec><Command>fixture.exe</Command></Exec></Actions></Task>"
+            );
+            let definition = from_bytes(input.as_bytes()).expect("well-formed extension input");
+            let first = to_string(&definition).expect("first canonical output");
+            let decoded = from_bytes(first.as_bytes()).expect("canonical output parses");
+            assert_eq!(
+                to_string(&decoded).expect("second canonical output"),
+                first,
+                "canonical extension positions for {unknown}"
+            );
+        }
+    }
+
+    #[test]
+    fn extension_ordinals_saturate_without_arithmetic_overflow() {
+        let extensions = [0, usize::MAX].map(|ordinal| XmlExtension {
+            parent: "Task".into(),
+            ordinal,
+            xml: format!("<Future ordinal=\"{ordinal}\" />"),
+        });
+        assert_eq!(
+            merge_extensions("Task", vec!["<Known />".into()], &extensions),
+            [
+                extensions[0].xml.as_str(),
+                "<Known />",
+                extensions[1].xml.as_str(),
+            ]
+        );
     }
 
     #[test]

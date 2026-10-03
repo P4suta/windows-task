@@ -19,6 +19,13 @@ anyhow = "1.0"
 clap   = { workspace = true }
 uuid   = { workspace = true }
 serde_json = { workspace = true }
+toml = { workspace = true }
+serde = { workspace = true }
+sha2 = "0.11.0"
+hex = "0.4.3"
+
+[dev-dependencies]
+serde-saphyr = { workspace = true }
 
 [lints]
 workspace = true

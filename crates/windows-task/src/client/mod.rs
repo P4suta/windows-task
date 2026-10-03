@@ -1513,6 +1513,55 @@ pub(crate) fn parse_folder_path(value: &str) -> Result<FolderPath> {
         .map_err(|error| Error::new(ErrorKind::InvalidPath, error.to_string()))
 }
 
+#[cfg(all(test, feature = "reconcile"))]
+mod reconciliation_contracts {
+    use super::*;
+    use crate::{
+        manifest::TaskManifest,
+        reconcile::{self, PlanOptions},
+    };
+
+    fn closed_scheduler() -> BlockingScheduler {
+        let (sender, _receiver) = mpsc::channel::<Job>();
+        let scheduler = Scheduler {
+            worker: Arc::new(Worker {
+                sender: Mutex::new(Some(sender)),
+                join: Mutex::new(None),
+            }),
+            connection: ConnectionInfo {
+                target_server: "fixture".into(),
+                user: None,
+                domain: None,
+                highest_version: 0x0001_0006,
+            },
+        };
+        scheduler.shutdown(Duration::ZERO).expect("closed session");
+        scheduler.blocking()
+    }
+
+    fn manifest() -> TaskManifest {
+        TaskManifest::new(
+            Uuid::nil(),
+            "tests",
+            "\\Fixture".parse().expect("namespace"),
+        )
+    }
+
+    #[test]
+    fn inspection_reports_a_closed_session_instead_of_empty_state() {
+        let error = reconcile::inspect(&closed_scheduler(), &manifest())
+            .expect_err("inspection requires a live session");
+        assert_eq!(error.kind(), ErrorKind::WorkerStopped);
+    }
+
+    #[test]
+    fn live_planning_reports_a_closed_session_instead_of_an_empty_plan() {
+        let error = reconcile::plan_live(&closed_scheduler(), &manifest(), PlanOptions::default())
+            .expect_err("live planning requires a live session");
+        assert_eq!(error.kind(), ErrorKind::WorkerStopped);
+    }
+}
+
 #[cfg(all(test, feature = "async"))]
 mod worker_tests {
     use super::*;

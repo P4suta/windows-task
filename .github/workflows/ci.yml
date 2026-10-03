@@ -57,6 +57,9 @@ jobs:
         run: >-
           rustup target add --toolchain 1.85.0
           x86_64-pc-windows-msvc aarch64-pc-windows-msvc
+      - name: Install pinned XML verifier
+        run: cargo +stable install --locked kani-verifier --version 0.68.0
+      - run: cargo kani setup
       - run: just ci
       - run: cargo +1.85.0 xtask package
       - name: Coverage (portable)

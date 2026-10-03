@@ -14,6 +14,7 @@ use anyhow::{Context as _, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use uuid::Uuid;
 
+mod release;
 mod verification;
 
 /// `cargo xtask` CLI surface.
@@ -28,6 +29,22 @@ struct Cli {
 /// Available subcommands.
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Reuse identical draft assets and upload only missing artifacts without publication.
+    UploadDraft {
+        /// Exact owner/repository.
+        #[arg(long)]
+        repo: String,
+        /// Existing draft tag.
+        #[arg(long)]
+        tag: String,
+        /// Directory containing the complete expected artifact set.
+        #[arg(long)]
+        artifacts: PathBuf,
+    },
+    /// Audit against a freshly cloned advisory database without replacing shared caches.
+    Audit,
+    /// Prove production XML ordering, release identities, and verification gates.
+    Prove,
     /// Scan source safety rules without requiring a Unix shell.
     StrictCode,
     /// Save platform-specific coverage without conflating compile-only targets.
@@ -138,6 +155,13 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
+        Command::UploadDraft {
+            repo,
+            tag,
+            artifacts,
+        } => release::upload_draft(&repo, &tag, Some(&artifacts), &[], false),
+        Command::Audit => verification::audit(),
+        Command::Prove => verification::prove(),
         Command::StrictCode => verification::strict_code(),
         Command::Coverage => verification::coverage(),
         Command::Ci { suite } => verification::ci(suite),

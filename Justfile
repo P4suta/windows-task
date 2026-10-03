@@ -77,6 +77,9 @@ markdownlint:
 strict-code:
     cargo xtask strict-code
 
+prove:
+    cargo xtask prove
+
 lint: fmt-check clippy typos actionlint yamllint markdownlint strict-code
 
 # ---------------------------------------------------------------------------
@@ -98,7 +101,7 @@ coverage:
     cargo xtask coverage
 
 audit:
-    mise exec github:EmbarkStudios/cargo-deny -- cargo-deny check
+    cargo xtask audit
 
 msrv:
     cargo +1.85.0 xtask msrv

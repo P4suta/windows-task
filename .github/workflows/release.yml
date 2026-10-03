@@ -14,6 +14,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -25,7 +29,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: refs/tags/${{ inputs.tag || github.ref_name }}
       - id: revision
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
@@ -103,22 +107,32 @@ jobs:
 
   release:
     name: Publish GitHub release
-    needs: build
+    environment: release
+    needs: [resolve, build]
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.revision }}
+          persist-credentials: false
       - uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
-      - name: Create or update release
+      - name: Complete an unpublished draft
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
+          set -euo pipefail
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" artifacts/* --clobber --repo "$GITHUB_REPOSITORY"
+            gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft \
+              | jq --exit-status '.isDraft == true'
+            cargo +1.85.0 xtask upload-draft --repo "$GITHUB_REPOSITORY" --tag "$RELEASE_TAG" --artifacts artifacts
           else
-            gh release create "$RELEASE_TAG" artifacts/* --generate-notes --verify-tag --repo "$GITHUB_REPOSITORY"
+            gh release create "$RELEASE_TAG" artifacts/* --draft --generate-notes --verify-tag --repo "$GITHUB_REPOSITORY"
           fi
+          gh release edit "$RELEASE_TAG" --draft=false --tag "$RELEASE_TAG" \
+            --verify-tag --repo "$GITHUB_REPOSITORY"

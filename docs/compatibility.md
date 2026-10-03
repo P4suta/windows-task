@@ -27,8 +27,8 @@ without surprising duplicate runs. Compilation also enforces the native
 
 Raw snapshots retain their original bytes and detected UTF-8/UTF-16 encoding.
 Typed round-trips preserve opaque elements at supported extension points.
-Canonical output is deterministic UTF-8 or UTF-16LE, not byte-identical to
-Windows-generated XML.
+Canonical output preserves extension sibling positions and remains stable across repeated typed round-trips.
+Canonical output is deterministic UTF-8 or UTF-16LE, not byte-identical to Windows-generated XML.
 
 Convenience parsing is bounded to 8 MiB, depth 64, and 100,000 elements. Event
 XML is bounded to 1 MiB and 10,000 elements. DTDs and general entity references

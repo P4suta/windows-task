@@ -2,6 +2,10 @@
 # yamllint (https://yamllint.readthedocs.io/) — relaxed defaults that
 # fit real-world GitHub Actions and issue-template YAML.
 extends: default
+ignore: |
+  target/
+  fixtures/native/target/
+  fuzz/target/
 
 rules:
   # Workflow / issue-template YAML routinely runs past 80 columns (URLs,

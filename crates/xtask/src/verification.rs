@@ -7,20 +7,141 @@ use std::{
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result, bail, ensure};
 use clap::ValueEnum;
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+#[cfg(kani)]
+mod proofs;
+
+#[derive(Clone, Copy)]
+enum ProofTarget {
+    XmlLibrary,
+    Automation,
+}
+
+impl ProofTarget {
+    fn arguments(self) -> &'static [&'static str] {
+        match self {
+            Self::XmlLibrary => &[
+                "kani",
+                "-p",
+                "windows-task",
+                "--lib",
+                "--no-default-features",
+            ],
+            Self::Automation => &["kani", "-p", "xtask", "--bin", "xtask"],
+        }
+    }
+}
+
+const REQUIRED_PROOFS: [(ProofTarget, &str); 8] = [
+    (
+        ProofTarget::XmlLibrary,
+        "xml::ordering::proofs::absolute_ordinal_is_bounded_without_arithmetic",
+    ),
+    (
+        ProofTarget::XmlLibrary,
+        "xml::ordering::proofs::extension_merge_without_known_children",
+    ),
+    (
+        ProofTarget::XmlLibrary,
+        "xml::ordering::proofs::extension_merge_with_first_known_child",
+    ),
+    (
+        ProofTarget::XmlLibrary,
+        "xml::ordering::proofs::extension_merge_with_second_known_child",
+    ),
+    (
+        ProofTarget::XmlLibrary,
+        "xml::ordering::proofs::extension_merge_with_both_known_children",
+    ),
+    (
+        ProofTarget::XmlLibrary,
+        "xml::ordering::proofs::extension_merge_regression_is_reachable",
+    ),
+    (
+        ProofTarget::Automation,
+        "verification::proofs::proof_batch_stops_on_first_failure",
+    ),
+    (
+        ProofTarget::Automation,
+        "release::proofs::fingerprint_identity_includes_size_and_digest",
+    ),
+];
+
+fn verify_proof_batch<P, E>(
+    preparation: Result<P, E>,
+    mut verify: impl FnMut(&P, ProofTarget, &str) -> Result<(), E>,
+) -> Result<P, E> {
+    let prepared = preparation?;
+    for (target, harness) in REQUIRED_PROOFS {
+        verify(&prepared, target, harness)?;
+    }
+    Ok(prepared)
+}
+
+fn verification_command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    for variable in [
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CONFIG",
+        "GIT_CONFIG_PARAMETERS",
+        "GIT_CONFIG_COUNT",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_IMPLICIT_WORK_TREE",
+        "GIT_GRAFT_FILE",
+        "GIT_INDEX_FILE",
+        "GIT_NO_REPLACE_OBJECTS",
+        "GIT_REPLACE_REF_BASE",
+        "GIT_PREFIX",
+        "GIT_SHALLOW_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_NAMESPACE",
+    ] {
+        command.env_remove(variable);
+    }
+    command
+}
+
+fn audit_configuration(source: &str, cache: &std::path::Path) -> Result<String> {
+    ensure!(
+        cache.is_absolute(),
+        "the advisory cache must be an absolute controlled path"
+    );
+    let mut configuration: toml::Table = toml::from_str(source)?;
+    let advisories = configuration
+        .entry("advisories")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    let advisories = advisories
+        .as_table_mut()
+        .context("advisories must be a table")?;
+    advisories.insert(
+        "db-path".into(),
+        toml::Value::String(
+            cache
+                .to_str()
+                .context("advisory cache path must be UTF-8")?
+                .into(),
+        ),
+    );
+    Ok(toml::to_string(&configuration)?)
+}
+
 #[derive(Clone, Copy, Debug, ValueEnum)]
 pub(super) enum Suite {
     Portable,
+    NativeFixture,
     Windows,
     All,
 }
 
 struct Run {
     directory: PathBuf,
+    cargo_target: PathBuf,
     results: Vec<Value>,
 }
 
@@ -31,7 +152,7 @@ impl Run {
             .join(Uuid::new_v4().to_string());
         fs::create_dir_all(&directory)?;
         let capture = |args: &[&str]| {
-            Command::new("git")
+            verification_command("git")
                 .args(args)
                 .output()
                 .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
@@ -50,10 +171,36 @@ impl Run {
             serde_json::to_vec_pretty(&environment)?,
         )?;
         eprintln!("Verification artifacts: {}", directory.display());
+        let cargo_target = std::path::absolute(
+            std::env::var_os("CARGO_TARGET_DIR")
+                .map_or_else(
+                    || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+                    PathBuf::from,
+                )
+                .join("verification-checks"),
+        )?;
         Ok(Self {
             directory,
+            cargo_target,
             results: Vec::new(),
         })
+    }
+
+    fn for_package() -> Result<Self> {
+        let mut run = Self::new()?;
+        let parent = run
+            .cargo_target
+            .parent()
+            .context("verification target requires a parent")?
+            .join("verification-packages");
+        fs::create_dir_all(&parent)?;
+        run.cargo_target = parent.join(
+            run.directory
+                .file_name()
+                .context("verification identity is required")?,
+        );
+        fs::create_dir(&run.cargo_target).context("create fresh private package outputs")?;
+        Ok(run)
     }
 
     fn step(
@@ -65,7 +212,7 @@ impl Run {
         let index = self.results.len();
         let stdout = self.directory.join(format!("{index:02}.stdout.log"));
         let stderr = self.directory.join(format!("{index:02}.stderr.log"));
-        let mut command = Command::new(program);
+        let mut command = verification_command(program);
         command.args(arguments).env("RUST_BACKTRACE", "1");
         for (key, value) in environment {
             command.env(key, value);
@@ -105,13 +252,97 @@ impl Run {
     }
 
     fn cargo(&mut self, arguments: &[&str]) -> Result<()> {
+        self.cargo_with_environment(arguments, &[])
+    }
+
+    fn cargo_with_environment(
+        &mut self,
+        arguments: &[&str],
+        environment: &[(&str, &str)],
+    ) -> Result<()> {
         let mut args = vec!["+1.85.0"];
         args.extend_from_slice(arguments);
-        self.step("cargo", &args, &[])
+        let target = self
+            .cargo_target
+            .to_str()
+            .context("verification target must be UTF-8")?
+            .to_owned();
+        let mut environment = environment.to_vec();
+        environment.push(("CARGO_TARGET_DIR", &target));
+        self.step("cargo", &args, &environment)
+    }
+
+    fn prepare_audit(&self) -> Result<PathBuf> {
+        let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+            || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+            PathBuf::from,
+        );
+        let parent = std::path::absolute(target)?.join("verification-advisories");
+        fs::create_dir_all(&parent)?;
+        let cache = parent.join(
+            self.directory
+                .file_name()
+                .context("verification identity is required")?,
+        );
+        fs::create_dir(&cache).context("create a fresh private advisory cache")?;
+        let source = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../deny.toml");
+        let configuration = audit_configuration(&fs::read_to_string(source)?, &cache)?;
+        let path = self.directory.join("deny.toml");
+        fs::write(&path, configuration)?;
+        Ok(path)
+    }
+
+    fn audit(&mut self) -> Result<()> {
+        let path = self.prepare_audit()?;
+        let null = if cfg!(windows) { "NUL" } else { "/dev/null" };
+        self.step(
+            "mise",
+            &[
+                "exec",
+                "github:EmbarkStudios/cargo-deny",
+                "--",
+                "cargo-deny",
+                "--config",
+                &path.to_string_lossy(),
+                "check",
+            ],
+            &[("GIT_CONFIG_GLOBAL", null), ("GIT_CONFIG_SYSTEM", null)],
+        )
+    }
+
+    fn actionlint(&mut self) -> Result<()> {
+        let mut paths = Vec::new();
+        for entry in fs::read_dir(".github/workflows")? {
+            let path = entry?.path();
+            if path.is_file()
+                && matches!(
+                    path.extension().and_then(|value| value.to_str()),
+                    Some("yml" | "yaml")
+                )
+            {
+                paths.push(
+                    path.to_str()
+                        .context("workflow paths must be UTF-8")?
+                        .to_owned(),
+                );
+            }
+        }
+        paths.sort();
+        ensure!(!paths.is_empty(), "no GitHub workflows were discovered");
+        let arguments: Vec<_> = paths.iter().map(String::as_str).collect();
+        self.step("actionlint", &arguments, &[])
     }
 
     fn suite(&mut self, suite: Suite) -> Result<()> {
         if matches!(suite, Suite::Portable | Suite::All) {
+            self.cargo(&[
+                "test",
+                "--locked",
+                "-p",
+                "xtask",
+                "--test",
+                "release_workflow",
+            ])?;
             self.cargo(&[
                 "test",
                 "--locked",
@@ -139,11 +370,11 @@ impl Run {
                 "macro_contracts",
             ])?;
         }
-        if matches!(suite, Suite::Windows | Suite::All) {
+        if matches!(suite, Suite::NativeFixture | Suite::Windows | Suite::All) {
             if !cfg!(windows) {
                 self.results
                     .push(json!({"suite": "windows", "outcome": "not_run",
-                    "error": "requires a disposable Windows host"}));
+                    "error": "requires a Windows host; scheduler suites require a disposable host"}));
                 fs::write(
                     self.directory.join("results.json"),
                     serde_json::to_vec_pretty(&self.results)?,
@@ -156,12 +387,11 @@ impl Run {
                 "--manifest-path",
                 "fixtures/native/Cargo.toml",
             ])?;
-            let dll = std::env::current_dir()?
-                .join("fixtures/native/target/release/windows_task_native_fixture.dll");
-            self.step(
-                "cargo",
+            let dll = self
+                .cargo_target
+                .join("release/windows_task_native_fixture.dll");
+            self.cargo_with_environment(
                 &[
-                    "+1.85.0",
                     "test",
                     "--locked",
                     "-p",
@@ -175,24 +405,22 @@ impl Run {
                 ],
                 &[("WINDOWS_TASK_HANDLER_DLL", &dll.to_string_lossy())],
             )?;
-            self.step(
-                "cargo",
+        }
+        if matches!(suite, Suite::Windows | Suite::All) && cfg!(windows) {
+            self.cargo(&[
+                "test",
+                "--locked",
+                "-p",
+                "windows-task",
+                "--all-features",
+                "--test",
+                "windows_smoke",
+            ])?;
+            let execution_fixture = self
+                .cargo_target
+                .join("release/windows-task-execution-fixture.exe");
+            self.cargo_with_environment(
                 &[
-                    "+1.85.0",
-                    "test",
-                    "--locked",
-                    "-p",
-                    "windows-task",
-                    "--all-features",
-                    "--test",
-                    "windows_smoke",
-                ],
-                &[],
-            )?;
-            self.step(
-                "cargo",
-                &[
-                    "+1.85.0",
                     "test",
                     "--locked",
                     "-p",
@@ -217,11 +445,7 @@ impl Run {
                     ),
                     (
                         "WINDOWS_TASK_EXECUTION_FIXTURE",
-                        &std::env::current_dir()?
-                            .join(
-                                "fixtures/native/target/release/windows-task-execution-fixture.exe",
-                            )
-                            .to_string_lossy(),
+                        &execution_fixture.to_string_lossy(),
                     ),
                 ],
             )?;
@@ -238,12 +462,64 @@ impl Run {
         }
         Ok(())
     }
+
+    fn proof_target(&self) -> Result<PathBuf> {
+        let target = self.directory.join("proofs");
+        fs::create_dir(&target).context("create fresh private proof outputs")?;
+        Ok(target.join("target"))
+    }
+
+    fn prove(&mut self) -> Result<()> {
+        self.finish()?;
+        let version_log = self
+            .directory
+            .join(format!("{:02}.stdout.log", self.results.len()));
+        self.step("cargo", &["kani", "--version"], &[])?;
+        self.finish()?;
+        ensure!(
+            fs::read_to_string(version_log)?.lines().next()
+                == Some("Kani Rust Verifier 0.68.0 (cargo plugin)"),
+            "implementation proofs require Kani 0.68.0"
+        );
+        verify_proof_batch(self.proof_target(), |target, kind, harness| {
+            let target = target.to_str().context("proof output path must be UTF-8")?;
+            let mut arguments = kind.arguments().to_vec();
+            arguments.extend_from_slice(&[
+                "--exact",
+                "--harness",
+                harness,
+                "--jobs",
+                "1",
+                "--target-dir",
+                target,
+                "--output-format",
+                "terse",
+            ]);
+            self.step("cargo", &arguments, &[])?;
+            self.finish()
+        })?;
+        self.finish()
+    }
 }
 
 pub(super) fn test(suite: Suite) -> Result<()> {
     let mut run = Run::new()?;
     run.suite(suite)?;
+    if cfg!(target_os = "linux") {
+        run.prove()?;
+    }
     run.finish()
+}
+
+pub(super) fn audit() -> Result<()> {
+    let mut run = Run::new()?;
+    run.audit()?;
+    run.finish()
+}
+
+pub(super) fn prove() -> Result<()> {
+    let mut run = Run::new()?;
+    run.prove()
 }
 
 pub(super) fn ci(suite: Suite) -> Result<()> {
@@ -286,10 +562,8 @@ pub(super) fn ci(suite: Suite) -> Result<()> {
         }
         run.cargo(&args)?;
     }
-    run.step(
-        "cargo",
+    run.cargo_with_environment(
         &[
-            "+1.85.0",
             "doc",
             "--locked",
             "--workspace",
@@ -309,15 +583,15 @@ pub(super) fn ci(suite: Suite) -> Result<()> {
             target,
         ])?;
     }
-    for (program, args) in [
-        ("cargo", vec!["+1.85.0", "xtask", "strict-code"]),
-        ("typos", vec![]),
-        ("actionlint", vec![]),
-        ("yamllint", vec!["."]),
-        ("cargo-deny", vec!["check"]),
-    ] {
+    run.cargo(&["xtask", "strict-code"])?;
+    for (program, args) in [("typos", vec![]), ("yamllint", vec!["."])] {
         run.step(program, &args, &[])
             .with_context(|| format!("record {program}"))?;
+    }
+    run.actionlint()?;
+    run.audit()?;
+    if cfg!(target_os = "linux") {
+        run.prove()?;
     }
     if cfg!(windows) {
         run.step(
@@ -349,7 +623,7 @@ pub(super) fn ci(suite: Suite) -> Result<()> {
 }
 
 pub(super) fn package() -> Result<()> {
-    let mut run = Run::new()?;
+    let mut run = Run::for_package()?;
     let version = env!("CARGO_PKG_VERSION");
     let staging = run.directory.join("source");
     fs::create_dir(&staging)?;
@@ -388,7 +662,9 @@ pub(super) fn package() -> Result<()> {
         }
         run.cargo(&arguments)?;
         run.finish()?;
-        let archive = staging.join(format!("target/package/{name}-{version}.crate"));
+        let archive = run
+            .cargo_target
+            .join(format!("package/{name}-{version}.crate"));
         // Preserve the actual package outside compiler caches for CI artifacts.
         fs::copy(&archive, unpack.join(format!("{name}-{version}.crate")))?;
         run.step(
@@ -448,13 +724,9 @@ fn main() -> windows_task::Result<()> {
         &consumer.join("Cargo.toml").to_string_lossy(),
     ])?;
     if cfg!(windows) {
-        let dll = std::env::current_dir()?
-            .join(&consumer)
-            .join("target/release/verification_handler.dll");
-        run.step(
-            "cargo",
+        let dll = run.cargo_target.join("release/verification_handler.dll");
+        run.cargo_with_environment(
             &[
-                "+1.85.0",
                 "test",
                 "--locked",
                 "-p",
@@ -604,6 +876,82 @@ pub(super) fn coverage() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn audit_preserves_every_policy_except_the_private_cache_path() {
+        let source = include_str!("../../../deny.toml");
+        let run = Run::new().expect("verification directory");
+        let cache = run.directory.join("controlled cache");
+        let configured = audit_configuration(source, &cache).expect("audit configuration");
+        let mut actual: toml::Table = toml::from_str(&configured).expect("generated TOML");
+        let expected: toml::Table = toml::from_str(source).expect("original policy");
+        let advisories = actual
+            .get_mut("advisories")
+            .expect("advisory policy")
+            .as_table_mut()
+            .expect("advisory table");
+        assert_eq!(
+            advisories.remove("db-path"),
+            Some(toml::Value::String(
+                cache.to_str().expect("controlled UTF-8 path").into()
+            ))
+        );
+        assert_eq!(actual, expected);
+        audit_configuration("advisories = 'invalid'", &cache)
+            .expect_err("malformed policy is rejected");
+        audit_configuration(source, std::path::Path::new("shared-cache"))
+            .expect_err("a relative cache is rejected");
+    }
+
+    #[test]
+    fn audit_cannot_reuse_an_existing_database_directory() {
+        let run = Run::new().expect("verification directory");
+        let configuration = run.prepare_audit().expect("fresh controlled cache");
+        assert!(configuration.is_file());
+        let policy: toml::Table =
+            toml::from_str(&fs::read_to_string(configuration).expect("audit policy"))
+                .expect("audit policy TOML");
+        let cache = policy["advisories"]["db-path"]
+            .as_str()
+            .expect("controlled cache path");
+        run.prepare_audit()
+            .expect_err("a shared cache cannot be reused");
+        assert_eq!(fs::read_dir(cache).expect("fresh cache").count(), 0);
+    }
+
+    #[test]
+    fn verification_clears_every_repository_variable_reported_by_git() {
+        let mut command = verification_command("git");
+        let output = command
+            .args(["rev-parse", "--local-env-vars"])
+            .output()
+            .expect("Git repository contract");
+        assert!(output.status.success());
+        let variables = String::from_utf8(output.stdout).expect("Git variable names");
+        let controlled = verification_command("git");
+        for variable in variables.split_whitespace().chain(["GIT_NAMESPACE"]) {
+            assert!(
+                controlled
+                    .get_envs()
+                    .any(|(name, value)| name == variable && value.is_none()),
+                "unhandled repository variable: {variable}"
+            );
+        }
+    }
+
+    #[test]
+    fn existing_proof_outputs_cannot_be_reused_or_overwritten() {
+        let run = Run::new().expect("verification directory");
+        let target = run.proof_target().expect("fresh private proof outputs");
+        fs::create_dir(&target).expect("simulated compiled proof models");
+        let model = target.join("previous-model");
+        fs::write(&model, b"previous checkout").expect("retained negative evidence");
+        run.proof_target().expect_err("existing outputs must fail");
+        assert_eq!(
+            fs::read(model).expect("preserved model"),
+            b"previous checkout"
+        );
+    }
 
     #[test]
     fn preserves_success_failure_and_unstarted_processes() {
