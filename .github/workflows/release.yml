@@ -112,13 +112,17 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
-      - name: Create or update release
+      - name: Complete an unpublished draft
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
+          set -euo pipefail
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" artifacts/* --clobber --repo "$GITHUB_REPOSITORY"
+            gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft \
+              | jq --exit-status '.isDraft == true'
+            gh release upload "$RELEASE_TAG" artifacts/* --repo "$GITHUB_REPOSITORY"
           else
-            gh release create "$RELEASE_TAG" artifacts/* --generate-notes --verify-tag --repo "$GITHUB_REPOSITORY"
+            gh release create "$RELEASE_TAG" artifacts/* --draft --generate-notes --verify-tag --repo "$GITHUB_REPOSITORY"
           fi
+          gh release edit "$RELEASE_TAG" --draft=false --repo "$GITHUB_REPOSITORY"

@@ -28,6 +28,8 @@ struct Cli {
 /// Available subcommands.
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Audit against a freshly cloned advisory database without replacing shared caches.
+    Audit,
     /// Scan source safety rules without requiring a Unix shell.
     StrictCode,
     /// Save platform-specific coverage without conflating compile-only targets.
@@ -138,6 +140,7 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> Result<()> {
     match cli.command {
+        Command::Audit => verification::audit(),
         Command::StrictCode => verification::strict_code(),
         Command::Coverage => verification::coverage(),
         Command::Ci { suite } => verification::ci(suite),

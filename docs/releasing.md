@@ -1,5 +1,7 @@
 # Releasing
 
+`just audit` checks the unchanged dependency policy against a freshly cloned advisory database and keeps its configuration and logs under `target/verification`.
+
 Release preparation is intentionally separate from publication. Update the
 workspace version and changelog, then run:
 
@@ -24,7 +26,8 @@ Review each package before running these commands. Publication is deliberately
 not part of CI and needs an authenticated maintainer. The three archives each
 include the shared README, Apache-2.0 and MIT texts, and NOTICE.
 
-Finally, create and push `v<workspace-version>`. The release workflow verifies
-the tag, builds x64 and ARM64 CLI archives on Windows, adds SHA-256 checksum
-files, and creates the GitHub release. Rerunning it updates the same assets
-rather than creating another release.
+Finally, create and push `v<workspace-version>`.
+The release workflow verifies the tag, builds x64 and ARM64 CLI archives on Windows, and adds SHA-256 checksum files.
+It attaches the complete artifact set to an unpublished draft before final publication.
+A retry may add missing draft assets, and conflicting names abort without replacement.
+Published releases and their assets cannot be updated; corrections require a new version.
