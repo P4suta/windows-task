@@ -7,7 +7,15 @@ use uuid::Uuid;
 
 #[derive(Deserialize)]
 struct Workflow {
+    concurrency: Option<Concurrency>,
     jobs: BTreeMap<String, Job>,
+}
+
+#[derive(Deserialize)]
+struct Concurrency {
+    group: String,
+    #[serde(rename = "cancel-in-progress")]
+    cancel_in_progress: bool,
 }
 
 #[derive(Deserialize)]
@@ -328,7 +336,7 @@ fn pending_tag_does_not_publish_an_existing_draft() {
 }
 
 #[test]
-fn publication_requires_approval_and_an_unambiguous_remote_tag_source() {
+fn publication_preserves_approval_source_identity_and_exclusive_authority() {
     let workflow: Workflow =
         serde_saphyr::from_str(include_str!("../../../.github/workflows/release.yml"))
             .expect("parse the production workflow");
@@ -336,6 +344,20 @@ fn publication_requires_approval_and_an_unambiguous_remote_tag_source() {
         workflow.jobs["release"].environment.as_deref(),
         Some("release"),
         "publication must enter the protected approval environment"
+    );
+    let concurrency = workflow
+        .concurrency
+        .as_ref()
+        .expect("publication attempts for one tag must be serialized");
+    assert!(
+        concurrency
+            .group
+            .ends_with("${{ inputs.tag || github.ref_name }}"),
+        "tag pushes and manual retries must share the same publication group"
+    );
+    assert!(
+        !concurrency.cancel_in_progress,
+        "a retry must not interrupt an active publication"
     );
     let source = workflow.jobs["resolve"]
         .steps
@@ -360,6 +382,16 @@ fn publication_requires_approval_and_an_unambiguous_remote_tag_source() {
             .expect("controller checkout")
             .parameters["ref"],
         "build and publication must use the same resolved revision"
+    );
+    assert_eq!(
+        workflow.jobs["release"]
+            .steps
+            .first()
+            .expect("controller checkout")
+            .parameters
+            .get("persist-credentials"),
+        Some(&json!(false)),
+        "the publisher must not leave ambient Git write credentials"
     );
 }
 
