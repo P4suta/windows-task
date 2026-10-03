@@ -12,12 +12,15 @@ struct Workflow {
 
 #[derive(Deserialize)]
 struct Job {
+    environment: Option<String>,
     #[serde(default)]
     steps: Vec<Step>,
 }
 
 #[derive(Deserialize)]
 struct Step {
+    #[serde(rename = "with", default)]
+    parameters: BTreeMap<String, serde_json::Value>,
     run: Option<String>,
 }
 
@@ -322,6 +325,42 @@ fn pending_tag_does_not_publish_an_existing_draft() {
     assert!(!passed, "remote tag verification must reject a pending tag");
     assert_eq!(state, "draft-tag-missing", "the draft is preserved");
     assert!(!effects.contains("publish"), "publication must not happen");
+}
+
+#[test]
+fn publication_requires_approval_and_an_unambiguous_remote_tag_source() {
+    let workflow: Workflow =
+        serde_saphyr::from_str(include_str!("../../../.github/workflows/release.yml"))
+            .expect("parse the production workflow");
+    assert_eq!(
+        workflow.jobs["release"].environment.as_deref(),
+        Some("release"),
+        "publication must enter the protected approval environment"
+    );
+    let source = workflow.jobs["resolve"]
+        .steps
+        .first()
+        .expect("source resolution checkout")
+        .parameters["ref"]
+        .as_str()
+        .expect("explicit source reference");
+    assert!(
+        source.starts_with("refs/tags/"),
+        "a same-named branch cannot select the release source"
+    );
+    assert_eq!(
+        workflow.jobs["build"]
+            .steps
+            .first()
+            .expect("build checkout")
+            .parameters["ref"],
+        workflow.jobs["release"]
+            .steps
+            .first()
+            .expect("controller checkout")
+            .parameters["ref"],
+        "build and publication must use the same resolved revision"
+    );
 }
 
 #[test]

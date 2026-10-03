@@ -32,4 +32,5 @@ It attaches the complete artifact set to an unpublished draft before final publi
 A retry reuses draft assets only when their size and SHA-256 match, uploads missing assets, and rejects conflicting or unexpected assets before publication.
 Legacy assets without a recorded digest are verified from downloaded bytes.
 Final publication verifies that the version tag exists remotely.
+Publication requires the maintainer's approval in the protected `release` environment.
 Published releases and their assets cannot be updated; corrections require a new version.

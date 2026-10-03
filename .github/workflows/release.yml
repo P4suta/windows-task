@@ -25,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.tag || github.ref }}
+          ref: refs/tags/${{ inputs.tag || github.ref_name }}
       - id: revision
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
@@ -103,6 +103,7 @@ jobs:
 
   release:
     name: Publish GitHub release
+    environment: release
     needs: [resolve, build]
     runs-on: ubuntu-latest
     permissions:
@@ -128,4 +129,5 @@ jobs:
           else
             gh release create "$RELEASE_TAG" artifacts/* --draft --generate-notes --verify-tag --repo "$GITHUB_REPOSITORY"
           fi
-          gh release edit "$RELEASE_TAG" --draft=false --tag "$RELEASE_TAG" --verify-tag --repo "$GITHUB_REPOSITORY"
+          gh release edit "$RELEASE_TAG" --draft=false --tag "$RELEASE_TAG" \
+            --verify-tag --repo "$GITHUB_REPOSITORY"
