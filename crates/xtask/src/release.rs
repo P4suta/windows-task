@@ -107,18 +107,11 @@ fn downloaded_fingerprint(repo: &str, asset: &Asset) -> Result<Fingerprint> {
         .stderr(Stdio::null())
         .spawn()
         .context("download legacy draft asset")?;
-    let result = Fingerprint::read(
-        child
-            .stdout
-            .take()
-            .context("asset download requires stdout")?,
-    );
-    if result.is_err() {
-        let _kill_result = child.kill();
-    }
-    let status = child.wait().context("wait for asset download")?;
-    ensure!(status.success(), "asset download failed: {status}");
-    result
+    let reader = child
+        .stdout
+        .take()
+        .context("asset download requires stdout")?;
+    read_download(child, reader)
 }
 
 fn missing<'a>(
@@ -227,4 +220,58 @@ pub(super) fn upload_draft(
         "draft asset set remains incomplete"
     );
     Ok(())
+}
+
+fn read_download(mut child: std::process::Child, reader: impl Read) -> Result<Fingerprint> {
+    let fingerprint = match Fingerprint::read(reader) {
+        Ok(fingerprint) => fingerprint,
+        Err(error) => {
+            let _kill_result = child.kill();
+            let _wait_result = child.wait();
+            return Err(error);
+        }
+    };
+    let status = child.wait().context("wait for asset download")?;
+    ensure!(status.success(), "asset download failed: {status}");
+    Ok(fingerprint)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct FailingReader;
+
+    impl Read for FailingReader {
+        fn read(&mut self, _buffer: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                "controlled primary read failure",
+            ))
+        }
+    }
+
+    #[test]
+    fn download_preserves_read_failure_when_child_is_terminated_or_already_failed() {
+        for argument in ["--version", "--not-a-rustc-option"] {
+            let mut child = Command::new("rustc")
+                .arg(argument)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("controlled compiler child");
+            if argument == "--not-a-rustc-option" {
+                assert!(
+                    !child.wait().expect("controlled child completion").success(),
+                    "the controlled child must already have failed"
+                );
+            }
+            let error = read_download(child, FailingReader).expect_err("controlled stream failure");
+            assert_eq!(
+                error.to_string(),
+                "controlled primary read failure",
+                "cleanup must preserve the causal read error"
+            );
+        }
+    }
 }
