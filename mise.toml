@@ -9,7 +9,7 @@ lefthook                      = "latest"
 "github:crate-ci/typos"      = "latest"
 actionlint                    = "latest"
 yamllint                      = "latest"
-"npm:markdownlint-cli2"      = "0.23.2"
+"npm:markdownlint-cli2"      = "0.23.3"
 "github:crate-ci/committed"  = "latest"
 ripgrep                       = "latest"
 

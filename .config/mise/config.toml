@@ -12,7 +12,7 @@
 # matching toolchain. Keep the two pins in sync on every bump.
 
 [tools]
-rust = "1.85.0"
+rust = "1.99.0"
 # Install development CLIs from their release artifacts. Building their latest
 # releases with Cargo would incorrectly couple their MSRVs to the crate's 1.85
 # MSRV (for example, cargo-deny itself currently requires newer Rust).
