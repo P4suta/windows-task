@@ -64,7 +64,7 @@ jobs:
       - run: cargo +1.85.0 xtask package
       - name: Coverage (portable)
         run: just coverage
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: verification-portable
@@ -112,7 +112,7 @@ jobs:
         run: cargo +1.85.0 xtask package
       - name: Coverage (Windows, reported separately from portable floor)
         run: cargo +1.85.0 xtask coverage
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: verification-windows-x64
@@ -162,7 +162,7 @@ jobs:
         run: cargo +1.85.0 xtask test --suite all
       - name: Execute ARM64 package consumers
         run: cargo +1.85.0 xtask package
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: verification-windows-arm64

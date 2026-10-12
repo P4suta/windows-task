@@ -39,7 +39,7 @@ jobs:
       - name: Repeated native connection and cleanup measurements
         shell: pwsh
         run: ./scripts/verify-native-resources.ps1
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: native-resource-measurements
@@ -58,7 +58,7 @@ jobs:
           mkdir -p fuzz/corpus/input_boundaries
           cp fuzz/seeds/* fuzz/corpus/input_boundaries/
           cargo +nightly fuzz run input_boundaries -- -max_total_time=1200 -seed=20260905 2>&1 | tee fuzz/run.log
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: fuzz-reproducers
@@ -76,7 +76,7 @@ jobs:
           persist-credentials: false
       - run: rustup toolchain install nightly --profile minimal --component miri
       - run: cargo +nightly miri test -p windows-task --no-default-features --lib 2>&1 | tee miri.log
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: miri-results
@@ -95,7 +95,7 @@ jobs:
           cargo +1.85.0 mutants -p windows-task --timeout 120 --gitignore true
           --file 'crates/windows-task/src/reconcile.rs'
           --file 'crates/windows-task/src/reconcile/**/*.rs'
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: mutation-results
