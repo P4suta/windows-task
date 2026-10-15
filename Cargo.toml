@@ -125,19 +125,19 @@ futures-core       = "0.3.31"
 jiff               = "0.2.35"
 proc-macro2        = "1.0"
 # 0.42 raises its MSRV to Rust 1.86; this workspace promises Rust 1.85.
-quick-xml          = "0.41"
+quick-xml          = "0.42"
 quote              = "1.0"
 serde              = { version = "1.0", features = ["derive"] }
 serde_json         = "1.0"
 # 0.0.10 is the newest release in this maintained line that compiles on the
 # promised Rust 1.85 MSRV. Newer releases use post-1.85 language features.
-serde-saphyr       = "=0.0.10"
+serde-saphyr       = "=0.0.29"
 syn                = { version = "2.0", features = ["full"] }
 thiserror          = "2.0"
 toml               = "0.9"
 uuid               = { version = "1.18", features = ["v4", "serde"] }
 windows            = "0.62.2"
-windows-core       = "0.62.2"
+windows-core       = "0.100.0"
 windows-task       = { version = "0.1.0", path = "crates/windows-task" }
 windows-task-macros = { version = "0.1.0", path = "crates/windows-task-macros" }
 zeroize            = { version = "1.8", features = ["derive"] }
