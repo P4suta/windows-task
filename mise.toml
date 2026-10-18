@@ -3,7 +3,7 @@
 # add their own entries (rustc, node, deno, …) when applied.
 
 [tools]
-node                          = "22"
+node                          = "24"
 just                          = "latest"
 lefthook                      = "latest"
 "github:crate-ci/typos"      = "latest"
