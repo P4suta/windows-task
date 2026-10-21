@@ -3,6 +3,23 @@
   "extends": ["github>P4suta/renovate-config"],
   "packageRules": [
     {
+      "description": "Keep crate updates compatible with the supported compiler.",
+      "matchManagers": ["cargo"],
+      "constraints": { "rust": "1.85.0" },
+      "constraintsFiltering": "strict"
+    },
+    {
+      "description": "UUID 1.27 requires Rust 1.89.",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["uuid"],
+      "allowedVersions": "<1.27"
+    },
+    {
+      "description": "Match the Windows support crate to the Windows bindings.",
+      "matchPackageNames": ["windows", "windows-core"],
+      "allowedVersions": ">=0.62.2 <0.63"
+    },
+    {
       "description": "The locked PyYAML release has Windows wheels through Python 3.14.",
       "matchPackageNames": ["python/cpython"],
       "allowedVersions": "<3.15"
