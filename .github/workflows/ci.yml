@@ -95,6 +95,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
         if: always()
         with:
+          retention-days: 7
           name: verification-portable
           path: |
             target/verification/
@@ -132,6 +133,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
         if: always()
         with:
+          retention-days: 7
           name: verification-windows-x64
           path: |
             target/verification/
@@ -182,6 +184,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
         if: always()
         with:
+          retention-days: 7
           name: verification-windows-arm64
           path: |
             target/verification/
@@ -218,6 +221,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
         if: always()
         with:
+          retention-days: 7
           name: verification-proofs
           path: |
             target/verification/
@@ -248,6 +252,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
         if: always()
         with:
+          retention-days: 7
           name: verification-features
           path: |
             target/verification/
@@ -278,6 +283,7 @@ jobs:
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7
         if: always()
         with:
+          retention-days: 7
           name: verification-packages
           path: |
             target/verification/
