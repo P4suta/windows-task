@@ -12,12 +12,12 @@
 # matching toolchain. Keep the two pins in sync on every bump.
 
 [tools]
-rust = "1.85.0"
+rust = { version = "1.85.0", profile = "minimal", components = "rustfmt,clippy" }
 # Install development CLIs from their release artifacts. Building their latest
 # releases with Cargo would incorrectly couple their MSRVs to the crate's 1.85
 # MSRV (for example, cargo-deny itself currently requires newer Rust).
-"github:nextest-rs/nextest" = "latest"
-"github:EmbarkStudios/cargo-deny" = "latest"
-"github:taiki-e/cargo-llvm-cov" = "latest"
+"github:nextest-rs/nextest" = { version = "cargo-nextest-0.9.148", lazy = true, lazy_bins = ["cargo-nextest"] }
+"github:EmbarkStudios/cargo-deny" = "0.20.2"
+"github:taiki-e/cargo-llvm-cov" = { version = "0.9.1", lazy = true, lazy_bins = ["cargo-llvm-cov"] }
 # bacon does not publish binary assets; its latest release supports Rust 1.85.
-"cargo:bacon" = "latest"  # `just watch`
+"cargo:bacon" = { version = "3.26.0", lazy = true, lazy_bins = ["bacon"] }

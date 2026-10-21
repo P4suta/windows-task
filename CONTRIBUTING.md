@@ -16,12 +16,15 @@ toolchain and the repository's lint/audit utilities:
 just bootstrap    # mise install + lefthook install
 just lint         # all configured lint passes
 just test         # workspace tests with every feature
+just features     # each library feature without default features
+just prove        # the named implementation proofs on supported Linux hosts
 just windows-check # compile x64 and ARM64 Windows targets
 just ci           # the complete local CI surface
 ```
 
-`just hooks` installs the lefthook pre-commit / commit-msg / pre-push
-hooks; anything that would fail in CI will fail locally first.
+`just hooks` installs the Lefthook pre-commit, commit-msg and pre-push hooks.
+The [CI selection guide](docs/ci.md) describes platform-specific checks and proof inputs.
+`just test` runs independently of Kani on every host.
 
 Portable tests run on any host. On Windows, read-only Task Scheduler smoke
 tests run normally. Set `WINDOWS_TASK_MUTATION_TESTS=1` only on a disposable CI
@@ -48,4 +51,4 @@ types: `feat` / `fix` / `docs` / `style` / `refactor` / `perf` /
 ## License
 
 By contributing you agree that your contribution is dual-licensed under
-Apache-2.0 OR MIT, the same terms as the project itself.
+MIT OR Apache-2.0, the same terms as the project itself.

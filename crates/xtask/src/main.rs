@@ -45,6 +45,8 @@ enum Command {
     Audit,
     /// Prove production XML ordering, release identities, and verification gates.
     Prove,
+    /// Test each supported library feature with default features disabled.
+    Features,
     /// Scan source safety rules without requiring a Unix shell.
     StrictCode,
     /// Save platform-specific coverage without conflating compile-only targets.
@@ -162,6 +164,7 @@ fn run(cli: Cli) -> Result<()> {
         } => release::upload_draft(&repo, &tag, Some(&artifacts), &[], false),
         Command::Audit => verification::audit(),
         Command::Prove => verification::prove(),
+        Command::Features => verification::features(),
         Command::StrictCode => verification::strict_code(),
         Command::Coverage => verification::coverage(),
         Command::Ci { suite } => verification::ci(suite),

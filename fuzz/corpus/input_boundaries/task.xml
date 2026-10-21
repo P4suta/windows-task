@@ -1,0 +1,1 @@
+<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task" version="1.6"><Actions><Exec><Command>fixture.exe</Command><Arguments>&amp;&lt;&gt;&quot;&apos;</Arguments></Exec></Actions></Task>

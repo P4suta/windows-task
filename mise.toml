@@ -3,15 +3,18 @@
 # add their own entries (rustc, node, deno, …) when applied.
 
 [tools]
-node                          = "22"
-just                          = "latest"
-lefthook                      = "latest"
-"github:crate-ci/typos"      = "latest"
-actionlint                    = "latest"
-yamllint                      = "latest"
-"npm:markdownlint-cli2"      = "0.23.2"
-"github:crate-ci/committed"  = "latest"
-ripgrep                       = "latest"
+node = "24.22.0"
+just = "1.59.0"
+lefthook = "2.2.2"
+"github:crate-ci/typos" = "1.51.1"
+actionlint = "1.7.12"
+yamllint = "1.38.0"
+"npm:markdownlint-cli2" = "0.23.3"
+"github:crate-ci/committed" = "1.1.11"
+ripgrep = "15.2.0"
+jq = "1.8.2"
+python = "3.14.8"
+uv = "0.13.4"
 
 [settings.npm]
 # The embedded installer omitted unicorn-magic from globby's Windows tree in

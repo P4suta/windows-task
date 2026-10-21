@@ -14,13 +14,13 @@ that links back.
 | [0005](./adr/0005-generate-a-contained-com-handler-server.md) | Generate a contained COM handler server | accepted |
 | [0006](./adr/0006-make-failures-observable-and-reproducible.md) | Make failures observable and reproducible | accepted |
 | [0007](./adr/0007-verify-absolute-xml-extension-ordering.md) | Verify absolute XML extension ordering | accepted |
+| [Select checks](./adr/select-checks-by-changed-contract.md) | Select checks by changed contract | proposed |
 
 ## Authoring a new ADR
 
-1. Copy `adr/0000-template.md` to `adr/NNNN-short-slug.md` with the
-   next sequential number.
+1. Copy `adr/0000-template.md` to `adr/short-slug.md` and add a `date: YYYY-MM-DD` front-matter field.
+   Preserve existing record filenames and links.
 2. Fill in the sections; keep paragraphs short and action-oriented.
 3. Add a row to the table above.
-4. Open a PR. ADRs are normally accepted on merge; controversial ones
-   are landed as `proposed` and flipped to `accepted` once the
-   discussion concludes.
+4. Open a PR.
+   ADRs are normally accepted on merge; controversial ones are landed as `proposed` and flipped to `accepted` once the discussion concludes.

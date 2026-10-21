@@ -3,19 +3,27 @@ name = "windows-task-fuzz"
 version = "0.0.0"
 publish = false
 edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
 
 [package.metadata]
 cargo-fuzz = true
 
 [workspace]
+resolver = "3"
+
+[features]
+default = ["libfuzzer"]
+libfuzzer = ["dep:libfuzzer-sys"]
 
 [dependencies]
-libfuzzer-sys = "0.4"
+libfuzzer-sys = { version = "0.4", optional = true }
 windows-task = { path = "../crates/windows-task" }
 
 [[bin]]
 name = "input_boundaries"
 path = "fuzz_targets/input_boundaries.rs"
+required-features = ["libfuzzer"]
 test = false
 doc = false
 bench = false
