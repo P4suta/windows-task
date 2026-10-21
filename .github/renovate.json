@@ -1,0 +1,26 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["github>P4suta/renovate-config"],
+  "packageRules": [
+    {
+      "description": "The locked PyYAML release has Windows wheels through Python 3.14.",
+      "matchPackageNames": ["python"],
+      "allowedVersions": "<3.15"
+    },
+    {
+      "description": "Keep the contributor toolchain at the supported Rust floor.",
+      "matchPackageNames": ["rust"],
+      "allowedVersions": "/^1\\.85(?:\\.0)?$/"
+    },
+    {
+      "description": "quick-xml 0.42 requires Rust 1.86.",
+      "matchPackageNames": ["quick-xml"],
+      "allowedVersions": "<0.42"
+    },
+    {
+      "description": "Keep the YAML parser compatible with Rust 1.85.",
+      "matchPackageNames": ["serde-saphyr"],
+      "allowedVersions": "<=0.0.10"
+    }
+  ]
+}

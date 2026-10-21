@@ -35,6 +35,9 @@ jobs:
 
   verify:
     needs: resolve
+    permissions:
+      contents: read
+      pull-requests: read
     uses: ./.github/workflows/ci.yml
     with:
       revision: ${{ needs.resolve.outputs.revision }}

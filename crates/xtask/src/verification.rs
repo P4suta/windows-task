@@ -98,6 +98,7 @@ fn verification_command(program: &str) -> Command {
         "GIT_NO_REPLACE_OBJECTS",
         "GIT_REPLACE_REF_BASE",
         "GIT_PREFIX",
+        "GIT_INTERNAL_SUPER_PREFIX",
         "GIT_SHALLOW_FILE",
         "GIT_COMMON_DIR",
         "GIT_NAMESPACE",
@@ -343,6 +344,7 @@ impl Run {
                 "--test",
                 "release_workflow",
             ])?;
+            self.cargo(&["test", "--locked", "-p", "xtask", "--test", "ci_selection"])?;
             self.cargo(&[
                 "test",
                 "--locked",
@@ -453,6 +455,36 @@ impl Run {
         Ok(())
     }
 
+    fn features(&mut self) -> Result<()> {
+        for features in [
+            "",
+            "client",
+            "async",
+            "history",
+            "diagnostics",
+            "serde",
+            "reconcile",
+            "recipes",
+            "cron",
+            "handler",
+            "tracing",
+        ] {
+            let mut args = vec![
+                "test",
+                "--locked",
+                "-p",
+                "windows-task",
+                "--lib",
+                "--no-default-features",
+            ];
+            if !features.is_empty() {
+                args.extend_from_slice(&["--features", features]);
+            }
+            self.cargo(&args)?;
+        }
+        Ok(())
+    }
+
     fn finish(&self) -> Result<()> {
         if self.results.iter().any(|step| step["outcome"] != "passed") {
             bail!(
@@ -505,9 +537,6 @@ impl Run {
 pub(super) fn test(suite: Suite) -> Result<()> {
     let mut run = Run::new()?;
     run.suite(suite)?;
-    if cfg!(target_os = "linux") {
-        run.prove()?;
-    }
     run.finish()
 }
 
@@ -520,6 +549,12 @@ pub(super) fn audit() -> Result<()> {
 pub(super) fn prove() -> Result<()> {
     let mut run = Run::new()?;
     run.prove()
+}
+
+pub(super) fn features() -> Result<()> {
+    let mut run = Run::new()?;
+    run.features()?;
+    run.finish()
 }
 
 pub(super) fn ci(suite: Suite) -> Result<()> {
@@ -536,32 +571,7 @@ pub(super) fn ci(suite: Suite) -> Result<()> {
         "warnings",
     ])?;
     run.suite(suite)?;
-    for features in [
-        "",
-        "client",
-        "async",
-        "history",
-        "diagnostics",
-        "serde",
-        "reconcile",
-        "recipes",
-        "cron",
-        "handler",
-        "tracing",
-    ] {
-        let mut args = vec![
-            "test",
-            "--locked",
-            "-p",
-            "windows-task",
-            "--lib",
-            "--no-default-features",
-        ];
-        if !features.is_empty() {
-            args.extend_from_slice(&["--features", features]);
-        }
-        run.cargo(&args)?;
-    }
+    run.features()?;
     run.cargo_with_environment(
         &[
             "doc",

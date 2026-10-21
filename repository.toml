@@ -1,0 +1,24 @@
+name = "windows-task"
+summary = "Safe Rust models, XML, and clients for Windows Task Scheduler"
+install = "cargo add windows-task --git https://github.com/P4suta/windows-task"
+usage_language = "rust"
+usage = '''
+use windows_task::model::{
+    DailyTrigger, ExecAction, Principal, ServiceAccount, TaskDateTime, TaskDefinition,
+};
+let definition = TaskDefinition::builder(ExecAction::new("agent.exe").args(["--once"]))
+    .description("Nightly agent run")
+    .run_as(Principal::service_account(ServiceAccount::LocalSystem))
+    .trigger(DailyTrigger::new(TaskDateTime::wall_clock(2026, 9, 5, 3, 30, 0)?))
+    .build()?;
+let xml = windows_task::xml::to_string(&definition)?;
+assert_eq!(windows_task::xml::from_bytes(xml.as_bytes())?, definition);
+# Ok::<(), windows_task::Error>(())
+'''
+documentation_index = true
+copyright = "2026 Yasunobu Sakashita"
+license = "MIT OR Apache-2.0"
+
+[[consent]]
+contributor = "Yasunobu"
+evidence = "https://github.com/P4suta/windows-task/commit/a100f89878fef266661c86b503fb3da4307248e6"

@@ -80,6 +80,9 @@ strict-code:
 prove:
     cargo xtask prove
 
+features:
+    cargo xtask features
+
 lint: fmt-check clippy typos actionlint yamllint markdownlint strict-code
 
 # ---------------------------------------------------------------------------
