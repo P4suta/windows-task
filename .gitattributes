@@ -1,4 +1,5 @@
 * text=auto eol=lf
+fuzz/**/*.bin binary
 
 # License / notice text files must stay LF on every checkout.
 LICENSE-* text eol=lf

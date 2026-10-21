@@ -17,7 +17,15 @@ Thumbs.db
 /fixtures/*/target/
 /fuzz/target/
 /fuzz/artifacts/
-/fuzz/corpus/
+/fuzz/corpus/*
+!/fuzz/corpus/input_boundaries/
+/fuzz/corpus/input_boundaries/*
+!/fuzz/corpus/input_boundaries/cron.txt
+!/fuzz/corpus/input_boundaries/dtd.xml
+!/fuzz/corpus/input_boundaries/manifest.json
+!/fuzz/corpus/input_boundaries/task.xml
+!/fuzz/corpus/input_boundaries/xml-extension-order.bin
+!/fuzz/corpus/input_boundaries/yaml-trailing-colon.bin
 
 # Direnv
 .envrc.local

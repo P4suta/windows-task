@@ -371,6 +371,21 @@ impl Run {
                 "--test",
                 "macro_contracts",
             ])?;
+            let artifacts = self.directory.join("input-corpus");
+            self.cargo(&[
+                "run",
+                "--locked",
+                "--manifest-path",
+                "fuzz/Cargo.toml",
+                "--no-default-features",
+                "--example",
+                "seed-replay",
+                "--",
+                "fuzz/corpus/input_boundaries",
+                artifacts
+                    .to_str()
+                    .context("corpus artifacts must be UTF-8")?,
+            ])?;
         }
         if matches!(suite, Suite::NativeFixture | Suite::Windows | Suite::All) {
             if !cfg!(windows) {

@@ -92,15 +92,17 @@ fixtures, and uploads `verification-windows-arm64` independently. Its actual
 runtime outcome must be checked; x64 cross-compilation is not a substitute.
 Remote RPC, credentials and Event Log access need a dedicated remote host.
 
-Run the fixed input corpus locally with
-`cargo run --manifest-path fuzz/Cargo.toml --example seed-replay`.
-The example shares the fuzz oracle but is not a libFuzzer target. Native resource
-checks accept `-TimeoutSeconds` and preserve a failure report when their disposable
-test process exceeds the deadline. This does not change production COM shutdown.
+The portable gate runs 1,000 deterministic inputs, including all six committed regression seeds in `fuzz/corpus/input_boundaries/`.
+It checks the existing XML and manifest round-trip properties without building libFuzzer or starting a coverage-guided campaign.
+Run it directly with `cargo run --locked --manifest-path fuzz/Cargo.toml --no-default-features --example seed-replay -- fuzz/corpus/input_boundaries`.
+The original `fuzz/seeds/` paths remain available for existing reproductions.
+Native resource checks accept `-TimeoutSeconds` and preserve a failure report when their disposable test process exceeds the deadline.
+This does not change production COM shutdown.
 
 `cargo xtask prove` runs Kani 0.68.0 against production XML ordering, release fingerprints, and the verification batch.
 Install it with `cargo +stable install --locked kani-verifier --version 0.68.0` and `cargo kani setup` on a supported host.
-Linux `cargo xtask test`, its normal pre-push hook, `cargo xtask ci`, and the required portable CI job include all eight named proofs and reject a missing harness or a different verifier version.
+`cargo xtask prove` includes all eight named proofs and rejects a missing harness or a different verifier version.
+The selected proof job runs this command separately from the portable tests, and release verification selects every check.
 Each batch creates a fresh private proof output directory so compiled models from another checkout cannot satisfy the current proof.
 The position proof covers every `usize` ordinal and child count without a loop bound.
 The ordering proofs call the production generic merger with all four presence combinations of two optional known children, two extensions, and arbitrary `usize` ordinals, with unwinding and reachability checks enabled.
