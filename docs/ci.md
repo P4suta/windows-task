@@ -11,7 +11,10 @@ The [path filters](../.github/filters/ci.yml) select additional contracts:
 | Windows native | Rust code, native fixtures, manifests, toolchain and CI configuration | Disposable x64 and ARM64 Windows runners |
 | Implementation proofs | XML, model, verification, release identity, dependencies and CI configuration | The eight named Kani harnesses with one proof worker |
 | Isolated features | Library source, feature declarations, dependencies and verification commands | Each supported library feature without default features |
-| Package consumers | Crate contents, root README, licenses, manifests and tool configuration | Consumers built from the generated crate archives on Windows |
+| Package consumers | Crate contents, root README, licenses, manifests and Rust toolchain inputs | Consumers built from the generated crate archives on Windows |
+
+Updates confined to mise tools or their download locks run the portable gate without starting native suites, feature matrices, package consumers, or proofs.
+The native, feature, and package jobs select their compiler explicitly.
 
 `just features`, `just prove`, and `just package` invoke those checks separately.
 The proof inventory and its first-failure behavior live in [the verification command](../crates/xtask/src/verification.rs).
