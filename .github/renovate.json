@@ -4,7 +4,7 @@
   "packageRules": [
     {
       "description": "The locked PyYAML release has Windows wheels through Python 3.14.",
-      "matchPackageNames": ["python"],
+      "matchPackageNames": ["python/cpython"],
       "allowedVersions": "<3.15"
     },
     {
