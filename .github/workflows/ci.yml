@@ -52,7 +52,7 @@ jobs:
           filters: .github/filters/ci.yml
       - uses: jdx/mise-action@fc42bcc7ddbf51124c30f95a877a0c5168a3bfde  # v5.2.1
         with:
-          version: v2026.10.13
+          version: v2026.10.14
           install_args: >-
             rust node python uv just github:crate-ci/typos actionlint yamllint jq
             npm:markdownlint-cli2 github:EmbarkStudios/cargo-deny github:crate-ci/committed ripgrep
@@ -203,7 +203,7 @@ jobs:
           persist-credentials: false
       - uses: jdx/mise-action@fc42bcc7ddbf51124c30f95a877a0c5168a3bfde  # v5.2.1
         with:
-          version: v2026.10.13
+          version: v2026.10.14
           install_args: rust
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6
         with:
