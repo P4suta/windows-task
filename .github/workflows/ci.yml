@@ -29,7 +29,7 @@ env:
 jobs:
   portable:
     name: Portable checks
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 25
     permissions:
       contents: read  # Check out source for the portable gate.
@@ -180,7 +180,7 @@ jobs:
     name: Implementation proofs
     needs: [portable]
     if: needs.portable.outputs.proofs == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
@@ -279,7 +279,7 @@ jobs:
     name: required
     if: always()
     needs: [portable, windows, windows-arm64, proofs, features, package]
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 5
     permissions: {}
     steps:
