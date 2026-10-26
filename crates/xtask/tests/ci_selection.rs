@@ -5,11 +5,15 @@ use serde_json::{Value, json};
 
 #[derive(Deserialize)]
 struct Workflow {
+    #[serde(rename = "on")]
+    events: BTreeMap<String, Value>,
     jobs: BTreeMap<String, Job>,
 }
 
 #[derive(Deserialize)]
 struct Job {
+    #[serde(rename = "if")]
+    condition: Option<String>,
     #[serde(default)]
     needs: Vec<String>,
     #[serde(default)]
@@ -159,7 +163,121 @@ fn missing_jobs_and_malformed_flags_fail_closed() {
 }
 
 #[test]
-fn release_selection_forces_all_checks_after_validating_flags() {
+fn ordinary_work_accepts_only_skipped_heavy_jobs() {
+    let mut needs = selected_native();
+    for flag in ["native", "proofs", "features", "package"] {
+        needs["portable"]["outputs"][flag] = json!("false");
+    }
+    needs["windows"]["result"] = json!("skipped");
+    needs["windows-arm64"]["result"] = json!("skipped");
+    assert_eq!(run_required(&needs), 0);
+    needs["proofs"]["result"] = json!("success");
+    assert_ne!(
+        run_required(&needs),
+        0,
+        "ordinary proof execution is unexpected"
+    );
+}
+
+#[test]
+fn unfinished_or_unknown_results_and_missing_flags_fail_closed() {
+    for job in [
+        "portable",
+        "windows",
+        "windows-arm64",
+        "proofs",
+        "features",
+        "package",
+    ] {
+        for result in [
+            json!(null),
+            json!(""),
+            json!("pending"),
+            json!("queued"),
+            json!("in_progress"),
+            json!("unknown"),
+        ] {
+            let mut needs = selected_native();
+            needs[job]["result"] = result;
+            assert_ne!(run_required(&needs), 0, "unfinished or unknown {job}");
+        }
+    }
+    for flag in ["native", "proofs", "features", "package"] {
+        let mut needs = selected_native();
+        needs["portable"]["outputs"]
+            .as_object_mut()
+            .expect("outputs")
+            .remove(flag);
+        assert_ne!(run_required(&needs), 0, "missing {flag}");
+    }
+}
+
+#[test]
+fn ordinary_events_and_heavy_job_conditions_use_the_selector() {
+    let workflow = workflow();
+    assert_eq!(
+        workflow
+            .events
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>(),
+        ["merge_group", "pull_request", "workflow_call"]
+    );
+    let revision = &workflow.events["workflow_call"]["inputs"]["revision"];
+    assert_eq!(revision["default"], json!(""));
+    assert_eq!(revision["required"], json!(false));
+    assert_eq!(revision["type"], json!("string"));
+    for (job, flag) in [
+        ("windows", "native"),
+        ("windows-arm64", "native"),
+        ("proofs", "proofs"),
+        ("features", "features"),
+        ("package", "package"),
+    ] {
+        assert_eq!(workflow.jobs[job].needs, ["portable"]);
+        assert_eq!(
+            workflow.jobs[job].condition.as_deref(),
+            Some(format!("needs.portable.outputs.{flag} == 'true'").as_str())
+        );
+    }
+}
+
+#[test]
+fn ordinary_revision_does_not_select_heavy_jobs_for_changed_paths() {
+    let workflow = workflow();
+    let step = workflow.jobs["portable"]
+        .steps
+        .iter()
+        .find(|step| step.env.contains_key("FULL"))
+        .expect("production selection");
+    let directory = std::env::temp_dir().join(format!("windows-task-ci-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&directory).expect("fresh selection directory");
+    let output_path = directory.join("outputs");
+    let output = Command::new(bash())
+        .args(["-c", &step.run])
+        .env("FULL", "false")
+        .env("NATIVE", "true")
+        .env("PROOFS", "true")
+        .env("FEATURES", "true")
+        .env("PACKAGE", "true")
+        .env("CONTRACT", &step.env["CONTRACT"])
+        .env("GITHUB_OUTPUT", &output_path)
+        .output()
+        .expect("execute the production selector");
+    assert!(output.status.success(), "{output:?}");
+    let actual = std::fs::read_to_string(&output_path).expect("selection outputs");
+    std::fs::remove_file(output_path).expect("remove selection output");
+    std::fs::remove_dir(directory).expect("remove empty selection directory");
+    for name in ["native", "proofs", "features", "package"] {
+        assert!(
+            actual.lines().any(|line| line == format!("{name}=false")),
+            "ordinary changes selected heavy work: {actual}"
+        );
+    }
+}
+
+#[test]
+fn selection_covers_both_admitted_full_values() {
     let workflow = workflow();
     let step = workflow.jobs["portable"]
         .steps
@@ -167,25 +285,18 @@ fn release_selection_forces_all_checks_after_validating_flags() {
         .find(|step| step.env.contains_key("FULL"))
         .expect("production selection");
     assert_eq!(step.env["FULL"], "${{ inputs.revision != '' }}");
-    for bits in 0_u32..32 {
+    assert_eq!(
+        step.env.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["CONTRACT", "FULL"]
+    );
+    for full in ["false", "true"] {
         let directory =
-            std::env::temp_dir().join(format!("windows-task-ci-{}-{bits}", std::process::id()));
+            std::env::temp_dir().join(format!("windows-task-ci-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&directory).expect("fresh selection output directory");
         let output_path = directory.join("outputs");
-        let flags = [0, 1, 2, 3, 4].map(|bit| {
-            if bits & (1 << bit) == 0 {
-                "false"
-            } else {
-                "true"
-            }
-        });
         let output = Command::new(bash())
             .args(["-c", &step.run])
-            .env("FULL", flags[0])
-            .env("NATIVE", flags[1])
-            .env("PROOFS", flags[2])
-            .env("FEATURES", flags[3])
-            .env("PACKAGE", flags[4])
+            .env("FULL", full)
             .env("CONTRACT", &step.env["CONTRACT"])
             .env("GITHUB_OUTPUT", &output_path)
             .output()
@@ -196,15 +307,14 @@ fn release_selection_forces_all_checks_after_validating_flags() {
             String::from_utf8_lossy(&output.stderr)
         );
         let actual = std::fs::read_to_string(&output_path).expect("selection outputs");
-        for (index, name) in ["native", "proofs", "features", "package"]
-            .iter()
-            .enumerate()
-        {
-            let expected = flags[0] == "true" || flags[index + 1] == "true";
+        assert_eq!(
+            actual.lines().count(),
+            4,
+            "the selector emits every job flag once"
+        );
+        for name in ["native", "proofs", "features", "package"] {
             assert!(
-                actual
-                    .lines()
-                    .any(|line| line == format!("{name}={expected}")),
+                actual.lines().any(|line| line == format!("{name}={full}")),
                 "{actual}"
             );
         }
@@ -214,7 +324,7 @@ fn release_selection_forces_all_checks_after_validating_flags() {
 }
 
 #[test]
-fn full_selection_cannot_hide_invalid_path_filter_outputs() {
+fn invalid_or_missing_full_fails_before_selection() {
     let workflow = workflow();
     let step = workflow.jobs["portable"]
         .steps
@@ -224,32 +334,36 @@ fn full_selection_cannot_hide_invalid_path_filter_outputs() {
     let directory = std::env::temp_dir().join(format!("windows-task-ci-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir(&directory).expect("fresh selection directory");
     let output_path = directory.join("outputs");
-    for full in ["true", "false"] {
-        for invalid in ["", "TRUE", "null", "1"] {
-            for name in ["FULL", "NATIVE", "PROOFS", "FEATURES", "PACKAGE"] {
-                let output = Command::new(bash())
-                    .args(["-c", &step.run])
-                    .env("FULL", full)
-                    .env("NATIVE", "false")
-                    .env("PROOFS", "false")
-                    .env("FEATURES", "false")
-                    .env("PACKAGE", "false")
-                    .env(name, invalid)
-                    .env("CONTRACT", &step.env["CONTRACT"])
-                    .env("GITHUB_OUTPUT", &output_path)
-                    .output()
-                    .expect("execute production selection");
-                assert!(!output.status.success(), "invalid {name} must be rejected");
-                assert!(
-                    String::from_utf8_lossy(&output.stderr).contains("invalid selection flags"),
-                    "the selector must reject the value, rather than fail to start jq"
-                );
-                assert_eq!(
-                    std::fs::read_to_string(&output_path).expect("selection output"),
-                    ""
-                );
-            }
+    for invalid in [
+        None,
+        Some(""),
+        Some("TRUE"),
+        Some("null"),
+        Some("1"),
+        Some("false\n"),
+    ] {
+        let mut command = Command::new(bash());
+        command.args(["-c", &step.run]).env_remove("FULL");
+        if let Some(value) = invalid {
+            command.env("FULL", value);
         }
+        let output = command
+            .env("CONTRACT", &step.env["CONTRACT"])
+            .env("GITHUB_OUTPUT", &output_path)
+            .output()
+            .expect("execute production selection");
+        assert!(
+            !output.status.success(),
+            "invalid FULL {invalid:?} must be rejected"
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("invalid full selection"),
+            "the selector must reject the value, rather than fail to start jq"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&output_path).expect("selection output"),
+            ""
+        );
     }
     std::fs::remove_file(output_path).expect("remove selection output");
     std::fs::remove_dir(directory).expect("remove empty selection directory");
