@@ -21,8 +21,28 @@ struct Concurrency {
 #[derive(Deserialize)]
 struct Job {
     environment: Option<String>,
+    uses: Option<String>,
+    needs: Option<Dependencies>,
+    #[serde(rename = "with", default)]
+    parameters: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     steps: Vec<Step>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum Dependencies {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl Dependencies {
+    fn contains(&self, job: &str) -> bool {
+        match self {
+            Self::One(dependency) => dependency == job,
+            Self::Many(dependencies) => dependencies.iter().any(|dependency| dependency == job),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -336,6 +356,51 @@ fn pending_tag_does_not_publish_an_existing_draft() {
 }
 
 #[test]
+fn release_verification_uses_the_resolved_revision_before_building() {
+    let workflow: Workflow =
+        serde_saphyr::from_str(include_str!("../../../.github/workflows/release.yml"))
+            .expect("parse the production release workflow");
+    let verify = &workflow.jobs["verify"];
+    assert!(
+        verify
+            .needs
+            .as_ref()
+            .expect("verification dependency")
+            .contains("resolve")
+    );
+    assert_eq!(verify.uses.as_deref(), Some("./.github/workflows/ci.yml"));
+    assert_eq!(
+        verify.parameters["revision"],
+        json!("${{ needs.resolve.outputs.revision }}")
+    );
+    let resolution = workflow.jobs["resolve"]
+        .steps
+        .iter()
+        .filter_map(|step| step.run.as_deref())
+        .collect::<Vec<_>>();
+    assert!(
+        resolution
+            .iter()
+            .any(|script| script.contains("git rev-parse HEAD")),
+        "release verification must receive a resolved commit"
+    );
+    assert!(
+        workflow.jobs["build"]
+            .needs
+            .as_ref()
+            .expect("build dependencies")
+            .contains("verify")
+    );
+    assert!(
+        workflow.jobs["release"]
+            .needs
+            .as_ref()
+            .expect("publication dependencies")
+            .contains("build")
+    );
+}
+
+#[test]
 fn publication_preserves_approval_source_identity_and_exclusive_authority() {
     let workflow: Workflow =
         serde_saphyr::from_str(include_str!("../../../.github/workflows/release.yml"))
@@ -343,7 +408,7 @@ fn publication_preserves_approval_source_identity_and_exclusive_authority() {
     assert_eq!(
         workflow.jobs["release"].environment.as_deref(),
         Some("release"),
-        "publication must enter the protected approval environment"
+        "publication must name the release environment"
     );
     let concurrency = workflow
         .concurrency

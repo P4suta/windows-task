@@ -1,0 +1,6 @@
+# SPDX-FileCopyrightText: 2026 P4suta
+# SPDX-License-Identifier: MIT OR Apache-2.0
+
+---
+self-hosted-runner:
+  labels: [ubuntu-26.04]

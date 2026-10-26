@@ -32,8 +32,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 25
     permissions:
-      contents: read
-      pull-requests: read
+      contents: read  # Check out source for the portable gate.
     outputs:
       native: ${{ steps.selection.outputs.native }}
       proofs: ${{ steps.selection.outputs.proofs }}
@@ -45,11 +44,6 @@ jobs:
           ref: ${{ inputs.revision || github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d  # v4.0.3
-        id: changes
-        with:
-          base: ${{ github.event.merge_group.base_sha || github.event.repository.default_branch }}
-          filters: .github/filters/ci.yml
       - uses: jdx/mise-action@fc42bcc7ddbf51124c30f95a877a0c5168a3bfde  # v5.2.1
         with:
           version: v2026.10.14
@@ -60,22 +54,14 @@ jobs:
         id: selection
         env:
           FULL: ${{ inputs.revision != '' }}
-          NATIVE: ${{ steps.changes.outputs.native }}
-          PROOFS: ${{ steps.changes.outputs.proofs }}
-          FEATURES: ${{ steps.changes.outputs.features }}
-          PACKAGE: ${{ steps.changes.outputs.package }}
           CONTRACT: >-
-            [$full, $native, $proofs, $features, $package] as $flags |
-            if all($flags[]; IN("true", "false")) then
-              {native: ($full == "true" or $native == "true"),
-               proofs: ($full == "true" or $proofs == "true"),
-               features: ($full == "true" or $features == "true"),
-               package: ($full == "true" or $package == "true")} |
+            if $full | IN("true", "false") then
+              ($full == "true") as $selected |
+              {native: $selected, proofs: $selected, features: $selected, package: $selected} |
               to_entries[] | "\(.key)=\(.value)"
-            else error("invalid selection flags") end
+            else error("invalid full selection") end
         run: |
-          jq -ern --arg full "$FULL" --arg native "$NATIVE" --arg proofs "$PROOFS" \
-            --arg features "$FEATURES" --arg package "$PACKAGE" "$CONTRACT" >> "$GITHUB_OUTPUT"
+          jq -ern --arg full "$FULL" "$CONTRACT" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6
         with:
           path: |
