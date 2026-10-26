@@ -1,13 +1,14 @@
 ---
 date: 2026-10-22
-status: proposed
+status: superseded
 ---
 
 # Select checks by changed contract
 
 ## Status
 
-Proposed.
+The automatic path-based scheduling decision is superseded by [release-only heavy checks](release-only-heavy-checks.md).
+The portable, diagnostic, source-identity, and strict-summary contracts remain in force.
 This changes CI cadence while preserving the diagnostic and proof contracts in [ADR 0006](0006-make-failures-observable-and-reproducible.md) and [ADR 0007](0007-verify-absolute-xml-extension-ordering.md).
 
 ## Context
@@ -19,7 +20,7 @@ The required check accepted skipped dependencies without distinguishing selected
 ## Decision
 
 Separate portable tests, isolated feature tests, the existing eight implementation proofs, package consumers and disposable native suites.
-Use the [CI path filters](../../.github/filters/ci.yml) to select the affected contracts while keeping portable checks mandatory.
+Use the [historical CI path filters](https://github.com/P4suta/windows-task/blob/b853ae99a68da1695d1ab404c60728ba052ad428/.github/filters/ci.yml) to select the affected contracts while keeping portable checks mandatory.
 Validate selector flags before forcing all checks for an explicit release revision.
 Require success for selected jobs and a skipped result for unselected jobs.
 Check the actual workflow decision expressions over their complete supported finite input domain.
