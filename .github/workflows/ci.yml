@@ -44,9 +44,9 @@ jobs:
           ref: ${{ inputs.revision || github.sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550  # v5.2.2
+      - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d  # v5.2.4
         with:
-          version: v2026.10.17
+          version: v2026.10.23
           install_args: >-
             rust node python uv just github:crate-ci/typos actionlint yamllint jq
             npm:markdownlint-cli2 github:EmbarkStudios/cargo-deny github:crate-ci/committed ripgrep
@@ -187,9 +187,9 @@ jobs:
         with:
           ref: ${{ inputs.revision || github.sha }}
           persist-credentials: false
-      - uses: jdx/mise-action@8418fedb1110381a0d3ba51a7a415d7c1b884550  # v5.2.2
+      - uses: jdx/mise-action@6be3c7ed4c21d4f76b208d351d95aac273ebb76d  # v5.2.4
         with:
-          version: v2026.10.17
+          version: v2026.10.23
           install_args: rust
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9  # v6
         with:
