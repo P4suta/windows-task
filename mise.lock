@@ -330,4 +330,4 @@ provenance = "github-attestations"
 version = "1.38.0"
 backend = "pypi:yamllint"
 specifiers = ["1.38.0"]
-uv = { path = ".mise/locks/yamllint/1.38.0", digest = "sha256:cd54fcb0c555b8d42b14cbe18d4196f45609bf7ceb59fb25846fba2234339ace" }
+uv = { path = ".mise/locks/yamllint/1.38.0", digest = "sha256:e13fad398b6216c5b78d8ed633b2282d36d145837a5116ad6f7057b0df9e424f" }
