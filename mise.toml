@@ -14,7 +14,7 @@ yamllint = "1.38.0"
 ripgrep = "15.2.0"
 jq = "1.8.2"
 python = "3.14.10"
-uv = "0.13.8"
+uv = "0.13.9"
 
 [settings.npm]
 # The embedded installer omitted unicorn-magic from globby's Windows tree in
